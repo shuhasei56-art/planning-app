@@ -40,7 +40,6 @@ import {
   onSnapshot,
   query,
   orderBy,
-  where,
   serverTimestamp,
 } from "firebase/firestore";
 
@@ -95,30 +94,13 @@ function addMonths(d, n) {
   x.setMonth(x.getMonth() + n);
   return x;
 }
-function sameDay(a, b) {
-  return (
-    a.getFullYear() === b.getFullYear() &&
-    a.getMonth() === b.getMonth() &&
-    a.getDate() === b.getDate()
-  );
-}
 function clamp(n, min, max) {
   return Math.max(min, Math.min(max, n));
-}
-function minutesSinceMidnight(d) {
-  return d.getHours() * 60 + d.getMinutes();
 }
 function humanTime(min) {
   const h = Math.floor(min / 60);
   const m = min % 60;
   return `${pad2(h)}:${pad2(m)}`;
-}
-function nowLocal() {
-  return new Date();
-}
-function uuid() {
-  // Lightweight unique id
-  return `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
 const WEEKDAY_JA = ["日", "月", "火", "水", "木", "金", "土"];
@@ -343,7 +325,7 @@ function parseQuickAdd(input) {
   }
 
   // Date like M/D or YYYY-M-D
-  const mdy = title.match(/\b(\d{1,4})[\/\-](\d{1,2})(?:[\/\-](\d{1,2}))?\b/);
+  const mdy = title.match(/\b(\d{1,4})[/-](\d{1,2})(?:[/-](\d{1,2}))?\b/);
   if (mdy) {
     const a = parseInt(mdy[1], 10);
     const b = parseInt(mdy[2], 10);
@@ -703,22 +685,6 @@ export default function App() {
     setToast({ title: "ノートを追加しました" });
   }
 
-  async function toggleHabit(habitId, dateISO) {
-    if (!user) return;
-    const h = habits.find((x) => x.id === habitId);
-    if (!h) return;
-    const log = { ...(h.log || {}) };
-    const before = !!log[dateISO];
-    if (before) delete log[dateISO];
-    else log[dateISO] = true;
-
-    await updateDoc(doc(db, "users", user.uid, "habits", habitId), {
-      log,
-      updatedAt: serverTimestamp(),
-    });
-    setToast({ title: before ? "習慣を未完了にしました" : "習慣を完了にしました" });
-  }
-
   async function sendChat(role, content, meta = {}) {
     if (!user) return;
     const col = collection(db, "users", user.uid, "chat");
@@ -777,7 +743,7 @@ export default function App() {
     if (t.startsWith("タスク追加:") || t.startsWith("タスク:")) {
       const body = t.replace(/^タスク追加:|^タスク:/, "").trim();
       // rough parse due date keywords
-      const dueMatch = body.match(/期限[:：]?\s*(\d{1,4}[\/\-]\d{1,2}(?:[\/\-]\d{1,2})?)/);
+      const dueMatch = body.match(/期限[:：]?\s*(\d{1,4}[/-]\d{1,2}(?:[/-]\d{1,2})?)/);
       const estMatch = body.match(/(\d{1,3})\s*分/);
       const due = dueMatch ? dueMatch[1].includes("/") ? dueMatch[1] : dueMatch[1].replace(/-/g, "/") : null;
       const est = estMatch ? parseInt(estMatch[1], 10) : null;
@@ -1604,9 +1570,10 @@ function DayView({
 }
 
 function AgendaView({ cursorDate, events, tasks, onEditEvent, onEditTask }) {
-  const start = startOfWeek(startOfMonth(cursorDate), true);
-  const end = addDays(start, 60);
   const rows = useMemo(() => {
+    const start = startOfWeek(startOfMonth(cursorDate), true);
+    const end = addDays(start, 60);
+
     const list = [];
     // events
     for (const e of events) {
