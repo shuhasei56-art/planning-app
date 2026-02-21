@@ -744,7 +744,7 @@ export default function App() {
 
   // Voice & playback
   const [voicePreset, setVoicePreset] = useLocalStorageState("lyricSong.voicePreset", "choir");
-  const [speechOverlay, setSpeechOverlay] = useLocalStorageState("lyricSong.speechOverlay", false);
+  const [speechOverlay, setSpeechOverlay] = useLocalStorageState("lyricSong.speechOverlay", true);
   const [loop, setLoop] = useLocalStorageState("lyricSong.loop", false);
   const [countInBars, setCountInBars] = useLocalStorageState("lyricSong.countInBars", 1);
   const [metronome, setMetronome] = useLocalStorageState("lyricSong.metronome", true);
@@ -762,6 +762,12 @@ export default function App() {
   const [playheadSec, setPlayheadSec] = useState(0);
 
   const abcDivRef = useRef(null);
+
+  // Warm up speech voices (some browsers populate asynchronously)
+  useEffect(() => {
+    if (!window.speechSynthesis) return;
+    try { window.speechSynthesis.getVoices(); } catch {}
+  }, []);
 
   // Generate project
   useEffect(() => {
@@ -888,42 +894,47 @@ export default function App() {
   }
 
   function speakLyricsKaraoke(project, ctx, startWhenSec) {
-    if (!speechOverlay || !window.speechSynthesis) return;
-    // Cancel any current speech
-    try { window.speechSynthesis.cancel(); } catch {}
+  // Intelligible "reading" layer using Web Speech API.
+  // This does NOT truly sing (WebSpeech can't do exact musical pitch),
+  // but we approximate by:
+  // - speaking each mora token timed to note durations
+  // - mapping MIDI pitch to SpeechSynthesisUtterance.pitch (0..2)
+  // - mapping note duration to utterance.rate
+  if (!speechOverlay || !window.speechSynthesis) return;
+  try { window.speechSynthesis.cancel(); } catch {}
 
-    const beatSec = 60 / project.bpm;
-    const notes = project.events.filter(e => e.type === "note");
-    const chunks = [];
-    // Group into small bursts for steadier speech scheduling
-    let buf = [];
-    let lastBeat = null;
-    for (const n of notes) {
-      if (lastBeat == null) lastBeat = n.tBeat;
-      if (n.tBeat - lastBeat > 2.0 || buf.length > 18) {
-        chunks.push({ tBeat: lastBeat, text: buf.join("") });
-        buf = [];
-        lastBeat = n.tBeat;
-      }
-      buf.push(n.lyric);
-    }
-    if (buf.length) chunks.push({ tBeat: lastBeat, text: buf.join("") });
+  const beatSec = 60 / project.bpm;
+  const notes = project.events.filter(e => e.type === "note");
 
-    const baseTimeMs = performance.now() + startWhenSec * 1000;
+  // pick a Japanese voice if available
+  const voices = window.speechSynthesis.getVoices?.() || [];
+  const jaVoice = voices.find(v => /ja/i.test(v.lang)) || null;
 
-    for (const ch of chunks) {
-      const u = new SpeechSynthesisUtterance(ch.text);
-      u.rate = clamp(0.9 + (project.bpm - 100) / 400, 0.7, 1.15);
-      u.pitch = clamp(1.0 + (project.complexity - 0.5) * 0.35, 0.6, 1.4);
-      u.volume = 0.8;
+  const baseTimeMs = performance.now() + Math.max(0, startWhenSec) * 1000;
 
-      const tMs = baseTimeMs + ch.tBeat * beatSec * 1000;
-      const delay = Math.max(0, tMs - performance.now());
-      setTimeout(() => {
-        try { window.speechSynthesis.speak(u); } catch {}
-      }, delay);
-    }
+  for (const n of notes) {
+    const u = new SpeechSynthesisUtterance(n.lyric);
+
+    if (jaVoice) u.voice = jaVoice;
+
+    // Map MIDI 48..84 roughly into pitch 0.6..1.6
+    const p = 0.6 + ((n.midi - 48) / (84 - 48)) * 1.0;
+    u.pitch = clamp(p, 0.4, 1.8);
+
+    // Rate: shorter notes speak faster
+    const durSec = Math.max(0.08, n.durBeats * beatSec);
+    const r = 1.05 * (0.22 / durSec); // 0.22s target per mora
+    u.rate = clamp(r, 0.7, 1.45);
+
+    u.volume = 1.0;
+
+    const tMs = baseTimeMs + n.tBeat * beatSec * 1000;
+    const delay = Math.max(0, tMs - performance.now());
+    setTimeout(() => {
+      try { window.speechSynthesis.speak(u); } catch {}
+    }, delay);
   }
+}
 
   async function play() {
     if (!project) return;
