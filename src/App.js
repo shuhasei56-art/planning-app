@@ -23,10 +23,12 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { initializeApp } from "firebase/app";
 import {
   getAuth,
-  GoogleAuthProvider,
-  signInWithPopup,
   signOut,
   onAuthStateChanged,
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
+  setPersistence,
+  browserLocalPersistence,
 } from "firebase/auth";
 import {
   getFirestore,
@@ -445,6 +447,91 @@ function Toast({ toast, onClose }) {
   );
 }
 
+
+function AuthScreen({ onLogin, onSignup }) {
+  const [mode, setMode] = React.useState("login"); // login | signup
+  const [email, setEmail] = React.useState("");
+  const [password, setPassword] = React.useState("");
+  const [err, setErr] = React.useState("");
+
+  async function submit() {
+    setErr("");
+    try {
+      if (!email || !password) {
+        setErr("メールアドレスとパスワードを入力してください。");
+        return;
+      }
+      if (password.length < 6) {
+        setErr("パスワードは6文字以上にしてください。");
+        return;
+      }
+      if (mode === "login") await onLogin(email, password);
+      else await onSignup(email, password);
+    } catch (e) {
+      const msg = String(e?.message || e);
+      // Firebase error hints (Japanese)
+      if (msg.includes("auth/invalid-credential") || msg.includes("auth/wrong-password")) {
+        setErr("メールアドレスまたはパスワードが違います。");
+      } else if (msg.includes("auth/user-not-found")) {
+        setErr("ユーザーが見つかりません。サインアップしてください。");
+      } else if (msg.includes("auth/email-already-in-use")) {
+        setErr("このメールアドレスは既に使われています。ログインしてください。");
+      } else if (msg.includes("auth/invalid-email")) {
+        setErr("メールアドレスの形式が正しくありません。");
+      } else {
+        setErr(msg);
+      }
+    }
+  }
+
+  return (
+    <div className="auth-screen">
+      <div className="auth-card">
+        <div className="auth-title">Super Planner</div>
+        <div className="auth-sub">ID（メール）とパスワードでログインできます（Firebase Auth）。</div>
+
+        <div className="auth-form">
+          <input
+            type="email"
+            placeholder="メールアドレス（ID）"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            autoComplete="email"
+          />
+          <input
+            type="password"
+            placeholder="パスワード"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            autoComplete={mode === "login" ? "current-password" : "new-password"}
+          />
+          {err ? <div className="auth-error">{err}</div> : null}
+
+          <button className="btn primary full" onClick={submit}>
+            {mode === "login" ? "ログイン" : "新規登録"}
+          </button>
+
+          <button
+            className="btn ghost full"
+            onClick={() => {
+              setErr("");
+              setMode((m) => (m === "login" ? "signup" : "login"));
+            }}
+          >
+            {mode === "login" ? "新規登録はこちら" : "ログインはこちら"}
+          </button>
+
+          <div className="auth-foot">
+            ※Firebase Console → Authentication → Sign-in method で「メール/パスワード」を有効化してください。
+            <br />
+            ※ログイン状態はブラウザに保存され、次回も自動で復帰します。
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // -------------------- Main App --------------------
 export default function App() {
   const [user, setUser] = useState(null);
@@ -601,9 +688,14 @@ export default function App() {
   }, [settings, user]);
 
   // -------------------- Actions --------------------
-  async function login() {
-    const provider = new GoogleAuthProvider();
-    await signInWithPopup(auth, provider);
+  async function loginWithEmail(email, password) {
+    await setPersistence(auth, browserLocalPersistence); // keep login state (永続化)
+    await signInWithEmailAndPassword(auth, email, password);
+  }
+
+  async function signUpWithEmail(email, password) {
+    await setPersistence(auth, browserLocalPersistence);
+    await createUserWithEmailAndPassword(auth, email, password);
   }
   async function logout() {
     await signOut(auth);
@@ -961,20 +1053,7 @@ export default function App() {
     return (
       <div className="app-root">
         <GlobalStyles theme={settings.theme} density={settings.density} />
-        <div className="auth-screen">
-          <div className="auth-card">
-            <div className="auth-title">Super Planner</div>
-            <div className="auth-sub">
-              Googleカレンダー風UI + タスク + AI相談（ローカル）
-            </div>
-            <button className="btn primary" onClick={login}>
-              <Icon name="user" /> Googleでログイン
-            </button>
-            <div className="auth-foot">
-              ※Firebase Auth（Google）を有効にしてください
-            </div>
-          </div>
-        </div>
+        <AuthScreen onLogin={loginWithEmail} onSignup={signUpWithEmail} />
       </div>
     );
   }
@@ -2461,6 +2540,8 @@ function GlobalStyles({ theme, density }) {
       .auth-title{ font-size: 28px; font-weight: 900; }
       .auth-sub{ color: var(--muted); margin: 10px 0 18px; line-height: 1.4; }
       .auth-foot{ color: var(--muted); margin-top: 14px; font-size: 12px; }
+.auth-form{ display:flex; flex-direction:column; gap:10px; margin-top: 10px; }
+.auth-error{ color: var(--red); font-size: 12px; text-align:left; padding: 6px 4px; }
 
       /* print */
       @media print{
