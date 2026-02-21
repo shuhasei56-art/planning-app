@@ -1,53 +1,38 @@
 // App.js
-// A single-file React prototype for a "Lyrics -> Song" generator.
-// Features included:
-// - Lyrics editor + tokenizer
-// - Local melody generator (works offline, no keys)
-// - Optional AI song-structure generator via backend proxy (/api/generate-song)
-// - Optional AI voice (TTS) via backend proxy (/api/tts) using OpenAI Audio API
-// - Playback with Tone.js
-// - Notation rendering with VexFlow
-// - MIDI export via @tonejs/midi
-// - WAV export via OfflineAudioContext render
+// ✅ Dependency-free (React only) single-file prototype.
+// - No Tone.js / VexFlow / @tonejs/midi imports
+// - Uses Web Audio API for playback (simple "sing-like" synth)
+// - Generates rhythm + melody from lyrics (JP-friendly heuristic)
+// - Provides:
+//   * Play/Stop
+//   * Tempo / Key / TimeSig / Complexity / Swing / Range / Seed
+//   * "Score" preview as lightweight text staff (ASCII-ish)
+//   * Export: MIDI (Standard MIDI File) generated in pure JS
+//   * Export: JSON project
 //
-// IMPORTANT:
-// 1) Do NOT put your OpenAI API key in the browser. Use a server proxy.
-// 2) "Singing" is approximated by a synth following melody + (optional) TTS overlay.
-//    True singing voice modeling is out of scope for a browser-only demo.
+// Notes:
+// - "AIが歌う" を本格的にやるにはサーバ側のTTS/歌声合成が必要ですが、
+//   App.js単体で完結する範囲として「歌うような合成音（ピッチ＋母音っぽいフィルタ）」を実装しています。
+// - CRA / Vite どちらでも動く想定（追加依存なし）。
 //
-// Install deps (example):
-//   npm i tone vexflow @tonejs/midi
-//
-// Optional UI deps (nice to have):
-//   npm i clsx
-//
-// Backend (example endpoints expected):
-//   POST /api/generate-song   { lyrics, settings } -> { tempo, key, timeSig, sections:[...], melody:[...], chords:[...] }
-//   POST /api/tts            { text, voice, style } -> { audioUrl } OR { audioBase64, mime }
-//
-// You can wire those endpoints to OpenAI Audio API /v1/audio/speech (model gpt-4o-mini-tts).
-// See OpenAI docs for latest model/params.
+// If your build previously failed because of missing 'tone', this file fixes it.
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import * as Tone from "tone";
-import { Midi } from "@tonejs/midi";
-import { Factory, EasyScore, System } from "vexflow";
 
 // -------------------------------
-// Utility
+// Utilities
 // -------------------------------
 const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
 const uid = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
 
-const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 const KEY_PRESETS = [
   { name: "C Major", tonic: "C", mode: "major" },
   { name: "G Major", tonic: "G", mode: "major" },
   { name: "D Major", tonic: "D", mode: "major" },
-  { name: "A Minor", tonic: "A", mode: "minor" },
-  { name: "E Minor", tonic: "E", mode: "minor" },
   { name: "F Major", tonic: "F", mode: "major" },
   { name: "Bb Major", tonic: "Bb", mode: "major" },
+  { name: "A Minor", tonic: "A", mode: "minor" },
+  { name: "E Minor", tonic: "E", mode: "minor" },
 ];
 
 const SCALE_STEPS = {
@@ -55,42 +40,49 @@ const SCALE_STEPS = {
   minor: [0, 2, 3, 5, 7, 8, 10], // natural minor
 };
 
-function noteToMidi(note) {
-  // note like "C4" "F#3" "Bb4"
-  const m = /^([A-G])([b#]?)(-?\d+)$/.exec(note);
-  if (!m) return 60;
-  const letter = m[1];
-  const acc = m[2];
-  const oct = parseInt(m[3], 10);
-  const base = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 }[letter];
-  const accidental = acc === "#" ? 1 : acc === "b" ? -1 : 0;
-  return (oct + 1) * 12 + base + accidental;
-}
-function midiToNote(n) {
-  const oct = Math.floor(n / 12) - 1;
-  const pc = ((n % 12) + 12) % 12;
+const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+const PC_FROM_NAME = {
+  C: 0,
+  "C#": 1,
+  Db: 1,
+  D: 2,
+  "D#": 3,
+  Eb: 3,
+  E: 4,
+  F: 5,
+  "F#": 6,
+  Gb: 6,
+  G: 7,
+  "G#": 8,
+  Ab: 8,
+  A: 9,
+  "A#": 10,
+  Bb: 10,
+  B: 11,
+};
+
+function midiToNoteName(midi) {
+  const pc = ((midi % 12) + 12) % 12;
+  const oct = Math.floor(midi / 12) - 1;
   return `${NOTE_NAMES[pc]}${oct}`;
 }
-function transposeMidi(n, semis) {
-  return clamp(n + semis, 0, 127);
+
+function midiToFreq(midi) {
+  return 440 * Math.pow(2, (midi - 69) / 12);
 }
 
 function tokenizeLyrics(lyrics) {
-  // Very simple tokenizer: split by whitespace and punctuation; keep line breaks.
   const lines = lyrics.split(/\r?\n/);
-  return lines.map((line) => {
-    const tokens = line
+  return lines.map((line) =>
+    line
       .trim()
       .split(/[\s　]+/g)
       .filter(Boolean)
-      .flatMap((w) => w.split(/([、。！？!?,.])/).filter(Boolean));
-    return tokens;
-  });
+      .flatMap((w) => w.split(/([、。！？!?,.])/).filter(Boolean))
+  );
 }
 
 function estimateSyllablesJP(token) {
-  // Heuristic: count kana-like chars; fallback to length.
-  // This is NOT perfect Japanese syllabification. It's a usable approximation.
   const kana = token.match(/[ぁ-んァ-ンー]/g);
   if (kana && kana.length) return kana.length;
   const latin = token.match(/[a-zA-Z]/g);
@@ -98,60 +90,54 @@ function estimateSyllablesJP(token) {
   return Math.max(1, Math.ceil(token.length / 2));
 }
 
-function buildScale(tonic = "C", mode = "major", octave = 4) {
-  // returns midi pitch classes in one octave as MIDI notes around octave
-  // tonic like "C" "Bb" "F#"
-  const m = /^([A-G])([b#]?)$/.exec(tonic);
-  if (!m) tonic = "C";
-  const letter = m ? m[1] : "C";
-  const acc = m ? m[2] : "";
-  const base = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 }[letter];
-  const accidental = acc === "#" ? 1 : acc === "b" ? -1 : 0;
-  const tonicPc = (base + accidental + 12) % 12;
+function buildScaleMidi(tonic = "C", mode = "major", octave = 4) {
+  const tonicPc = PC_FROM_NAME[tonic] ?? 0;
   const steps = SCALE_STEPS[mode] || SCALE_STEPS.major;
   const rootMidi = (octave + 1) * 12 + tonicPc;
   return steps.map((s) => rootMidi + s);
 }
 
+// Simple seeded RNG for repeatability
+function makeRng(seed) {
+  let s = Math.max(1, Math.floor(seed || 1)) >>> 0;
+  return () => {
+    s = (s * 1664525 + 1013904223) >>> 0;
+    return s / 4294967296;
+  };
+}
+
 // -------------------------------
-// Local melody generator
+// Local song generator (offline)
 // -------------------------------
 function localGenerateSong({ lyrics, settings }) {
   const {
     tempo = 110,
-    swing = 0,
+    swing = 0.1,
     keyTonic = "C",
     keyMode = "major",
     timeSig = "4/4",
-    complexity = 0.55,
-    range = 12,
-    seed = 1,
+    complexity = 0.6,
+    range = 14,
+    seed = 42,
   } = settings;
 
-  // Simple seeded RNG for repeatability
-  let s = Math.max(1, Math.floor(seed));
-  const rnd = () => {
-    s = (s * 1664525 + 1013904223) % 4294967296;
-    return s / 4294967296;
-  };
+  const rnd = makeRng(seed);
 
   const [beatsPerBar, beatUnit] = timeSig.split("/").map((x) => parseInt(x, 10));
   const beatSeconds = 60 / tempo;
-  const stepDur = beatSeconds * (4 / beatUnit) * 0.5; // eighth-notes default
+  const eighthSeconds = beatSeconds * (4 / beatUnit) * 0.5; // 8th grid
   const maxBars = 16 + Math.floor(complexity * 32);
 
-  const scale = buildScale(keyTonic, keyMode, 4);
-  const center = noteToMidi(`${keyTonic.replace("Bb", "A#")}4`);
+  const scale = buildScaleMidi(keyTonic, keyMode, 4);
+  const center = (5 * 12) + (PC_FROM_NAME[keyTonic] ?? 0); // around octave 4-ish
   const low = center - Math.floor(range / 2);
   const high = center + Math.floor(range / 2);
 
   const lines = tokenizeLyrics(lyrics);
-  const melody = [];
-  const sections = [];
-  let t = 0;
-  let bar = 0;
+  const tokens = (lines.flat().length ? lines.flat() : ["la"]).slice(0, 999);
 
-  const sectionPlan = [
+  // Section plan
+  const basePlan = [
     { name: "Intro", bars: 2 },
     { name: "Verse", bars: 4 },
     { name: "Chorus", bars: 4 },
@@ -162,90 +148,74 @@ function localGenerateSong({ lyrics, settings }) {
     { name: "Outro", bars: 2 },
   ];
 
-  const plan = [];
-  let total = 0;
-  for (const p of sectionPlan) {
-    if (total + p.bars > maxBars) break;
-    plan.push(p);
-    total += p.bars;
-  }
-
+  const sections = [];
   const chords = [];
   const chordPoolMajor = ["I", "V", "vi", "IV", "ii", "V", "I", "I"];
   const chordPoolMinor = ["i", "VII", "VI", "VII", "i", "iv", "V", "i"];
 
-  for (const sec of plan) {
-    sections.push({ id: uid(), name: sec.name, startBar: bar, bars: sec.bars });
-    for (let b = 0; b < sec.bars; b++) {
-      const deg = keyMode === "minor" ? chordPoolMinor[(bar + b) % chordPoolMinor.length] : chordPoolMajor[(bar + b) % chordPoolMajor.length];
-      chords.push({ bar: bar + b, symbol: deg });
+  let bar = 0;
+  let totalBars = 0;
+  for (const p of basePlan) {
+    if (totalBars + p.bars > maxBars) break;
+    sections.push({ id: uid(), name: p.name, startBar: bar, bars: p.bars });
+    for (let b = 0; b < p.bars; b++) {
+      const sym = keyMode === "minor"
+        ? chordPoolMinor[(bar + b) % chordPoolMinor.length]
+        : chordPoolMajor[(bar + b) % chordPoolMajor.length];
+      chords.push({ bar: bar + b, symbol: sym });
     }
-    bar += sec.bars;
+    bar += p.bars;
+    totalBars += p.bars;
   }
 
-  // Map lyrics tokens onto steps with rhythmic variation
-  const allTokens = lines.flat();
-  const totalSteps = total * beatsPerBar * 2; // eighth-note grid
-  const tokens = allTokens.length ? allTokens : ["la"];
-  const tokenToStep = totalSteps / tokens.length;
+  const totalSteps = totalBars * beatsPerBar * 2; // 8th notes count
+  const melody = [];
 
-  let prevMidi = center;
-  for (let i = 0; i < tokens.length && i < totalSteps; i++) {
-    const token = tokens[i];
-    const syl = estimateSyllablesJP(token);
-    const durStepsBase = clamp(Math.round((syl * (0.6 + complexity)) * 0.8), 1, 8);
-    const jitter = (rnd() - 0.5) * complexity * 4;
-    const durSteps = clamp(durStepsBase + Math.round(jitter), 1, 8);
-
-    // Choose a scale degree near previous, with occasional leaps at higher complexity
-    const leapChance = 0.08 + 0.35 * complexity;
-    const leap = rnd() < leapChance ? (rnd() < 0.5 ? -5 : 5) : (rnd() < 0.5 ? -2 : 2);
-    const nearestScale = (m) => {
-      let best = scale[0];
-      let bestD = Infinity;
-      for (let k = -2; k <= 2; k++) {
-        for (const p of scale) {
-          const cand = p + 12 * k;
-          const d = Math.abs(cand - m);
-          if (d < bestD) {
-            bestD = d;
-            best = cand;
-          }
+  const nearestScale = (m) => {
+    let best = scale[0];
+    let bestD = Infinity;
+    for (let k = -2; k <= 2; k++) {
+      for (const p of scale) {
+        const cand = p + 12 * k;
+        const d = Math.abs(cand - m);
+        if (d < bestD) {
+          bestD = d;
+          best = cand;
         }
       }
-      return best;
-    };
+    }
+    return best;
+  };
 
-    const target = clamp(prevMidi + leap + Math.round((rnd() - 0.5) * complexity * 6), low, high);
-    let midi = nearestScale(target);
+  let t = 0;
+  let prev = center;
+  let tokenIndex = 0;
 
-    // add ornament at high complexity (grace-like short note)
-    const addOrn = complexity > 0.6 && rnd() < (complexity - 0.55);
+  while (t < totalSteps * eighthSeconds && tokenIndex < tokens.length) {
+    const token = tokens[tokenIndex++];
+    const syl = estimateSyllablesJP(token);
+
+    // Duration in 8th steps
+    const baseSteps = clamp(Math.round(syl * (0.6 + complexity) * 0.7), 1, 8);
+    const jitter = Math.round((rnd() - 0.5) * complexity * 4);
+    const steps = clamp(baseSteps + jitter, 1, 8);
+
+    const leapChance = 0.08 + 0.35 * complexity;
+    const leap = rnd() < leapChance ? (rnd() < 0.5 ? -5 : 5) : (rnd() < 0.5 ? -2 : 2);
+    const target = clamp(prev + leap + Math.round((rnd() - 0.5) * complexity * 6), low, high);
+    const midi = nearestScale(target);
+
+    // Ornament note at higher complexity
+    const addOrn = complexity > 0.62 && rnd() < (complexity - 0.58);
     if (addOrn) {
-      const ornMidi = nearestScale(clamp(midi + (rnd() < 0.5 ? -2 : 2), low, high));
-      melody.push({
-        t,
-        dur: stepDur * 0.5,
-        midi: ornMidi,
-        lyric: "",
-        type: "ornament",
-        vel: 0.5,
-      });
-      t += stepDur * 0.5;
+      const orn = nearestScale(clamp(midi + (rnd() < 0.5 ? -2 : 2), low, high));
+      melody.push({ t, dur: eighthSeconds * 0.5, midi: orn, lyric: "", type: "orn", vel: 0.5 });
+      t += eighthSeconds * 0.5;
     }
 
-    melody.push({
-      t,
-      dur: stepDur * durSteps,
-      midi,
-      lyric: token,
-      type: "note",
-      vel: 0.75,
-    });
-
-    // swing: delay every other eighth at playback time; keep data grid simple
-    t += stepDur * durSteps;
-    prevMidi = midi;
+    melody.push({ t, dur: eighthSeconds * steps, midi, lyric: token, type: "note", vel: 0.75 });
+    t += eighthSeconds * steps;
+    prev = midi;
   }
 
   return {
@@ -256,115 +226,248 @@ function localGenerateSong({ lyrics, settings }) {
     sections,
     chords,
     melody,
+    createdAt: new Date().toISOString(),
   };
 }
 
 // -------------------------------
-// Notation rendering (VexFlow)
+// Lightweight "Score" rendering (text)
 // -------------------------------
-function renderNotation(containerEl, song) {
-  if (!containerEl) return;
-  containerEl.innerHTML = "";
-
-  const width = containerEl.clientWidth ? containerEl.clientWidth : 900;
-  const vf = new Factory({ renderer: { elementId: containerEl, width, height: 260 } });
-  const score = vf.EasyScore();
-  const system = vf.System({ x: 10, y: 20, width: width - 20, spaceBetweenStaves: 10 });
-
-  const beats = parseInt(song.timeSig.split("/")[0], 10);
-  const beatUnit = parseInt(song.timeSig.split("/")[1], 10);
-
-  // Convert a subset of melody to notation-friendly durations
-  // We'll render first ~4 bars for simplicity in this prototype.
+function songToTextScore(song, barsToShow = 8) {
+  const [beatsPerBar, beatUnit] = song.timeSig.split("/").map((x) => parseInt(x, 10));
   const beatSeconds = 60 / song.tempo;
-  const barSeconds = beatSeconds * beats * (4 / beatUnit);
+  const eighthSeconds = beatSeconds * (4 / beatUnit) * 0.5;
+  const totalEighths = barsToShow * beatsPerBar * 2;
 
-  const start = 0;
-  const end = barSeconds * 4;
-  const notes = song.melody.filter((n) => n.t >= start && n.t < end && n.type === "note");
-
-  // map seconds to quantized durations (8th / 16th)
-  const quant = (sec) => {
-    const q = beatSeconds * 0.5; // 8th note
-    return Math.max(1, Math.round(sec / q));
-  };
-
-  const vexDur = (steps) => {
-    // steps are 8th-note units; convert to vexflow duration strings (approx)
-    if (steps <= 1) return "8";
-    if (steps === 2) return "q";
-    if (steps === 3) return "q."; // dotted quarter
-    if (steps === 4) return "h";
-    if (steps === 6) return "h."; // dotted half
-    if (steps >= 8) return "w";
-    return "q";
-  };
-
-  const staveNotes = [];
-  for (const n of notes) {
-    const steps = quant(n.dur);
-    const dur = vexDur(steps);
-    const note = midiToNote(n.midi).replace("B#", "C").replace("E#", "F"); // normalize a bit
-    // VexFlow expects lowercase note names and octave like "c/4"
-    const m = /^([A-G])(#?)(\d)$/.exec(note);
-    if (!m) continue;
-    const name = m[1].toLowerCase();
-    const acc = m[2];
-    const oct = m[3];
-    const key = `${name}${acc ? acc : ""}/${oct}`;
-    staveNotes.push({ key, dur, lyric: n.lyric });
-    if (staveNotes.length > 24) break;
+  // Map events to 8th grid
+  const grid = Array.from({ length: totalEighths }, () => null);
+  for (const n of song.melody) {
+    if (n.type !== "note") continue;
+    const idx = Math.round(n.t / eighthSeconds);
+    if (idx >= 0 && idx < grid.length) grid[idx] = n;
   }
 
-  const voice = score.voice(
-    staveNotes.map((n) => `${n.key}/${n.dur}`).join(", "),
-    { time: song.timeSig }
-  );
+  // Pitch visualization: map midi to vertical characters
+  const minMidi = Math.min(...song.melody.filter(n=>n.type==="note").map(n=>n.midi), 60);
+  const maxMidi = Math.max(...song.melody.filter(n=>n.type==="note").map(n=>n.midi), 72);
+  const height = clamp(maxMidi - minMidi + 1, 8, 18);
 
-  system
-    .addStave({
-      voices: [voice],
-    })
-    .addClef("treble")
-    .addTimeSignature(song.timeSig)
-    .addKeySignature(song.key.tonic);
+  const lines = [];
+  // Top header: bar markers
+  let header = "      ";
+  for (let i = 0; i < totalEighths; i++) {
+    const isBar = i % (beatsPerBar * 2) === 0;
+    header += isBar ? "|" : (i % 2 === 0 ? "." : " ");
+  }
+  lines.push(header);
+  lines.push(`Key: ${song.key.tonic} ${song.key.mode}   Time: ${song.timeSig}   Tempo: ${song.tempo} BPM`);
 
-  vf.draw();
+  // Staff-ish graph
+  const plot = Array.from({ length: height }, () => Array.from({ length: totalEighths }, () => " "));
+  for (let i = 0; i < totalEighths; i++) {
+    const n = grid[i];
+    if (!n) continue;
+    const y = clamp(maxMidi - n.midi, 0, height - 1);
+    plot[y][i] = "●";
+  }
+
+  for (let y = 0; y < height; y++) {
+    const midi = maxMidi - y;
+    const label = midiToNoteName(midi).padEnd(5, " ");
+    lines.push(label + " " + plot[y].join(""));
+  }
+
+  // Lyrics timeline
+  let lyricLine = "Lyric ";
+  for (let i = 0; i < totalEighths; i++) {
+    const n = grid[i];
+    if (!n || !n.lyric) {
+      lyricLine += " ";
+      continue;
+    }
+    // place a marker and keep actual lyrics below
+    lyricLine += "^";
+  }
+  lines.push(lyricLine);
+
+  const lyricWords = grid
+    .map((n, i) => (n && n.lyric ? `${i.toString().padStart(3, "0")}:${n.lyric}` : null))
+    .filter(Boolean)
+    .slice(0, 120);
+
+  if (lyricWords.length) {
+    lines.push("Words: " + lyricWords.join("  "));
+  }
+  return lines.join("\n");
 }
 
 // -------------------------------
-// MIDI export
+// WebAudio "sing-like" synth
 // -------------------------------
-function songToMidi(song) {
-  const midi = new Midi();
-  midi.header.setTempo(song.tempo);
-  const [beats] = song.timeSig.split("/").map((x) => parseInt(x, 10));
-  midi.header.timeSignatures.push({ ticks: 0, timeSignature: [beats, 4] });
+function createSingerSynth(audioCtx) {
+  // A simple vocal-ish chain:
+  // Oscillator (saw) -> Gain (envelope) -> BiquadFilter (formant-ish) -> Compressor -> Destination
+  const out = audioCtx.createGain();
+  out.gain.value = 0.9;
 
-  const track = midi.addTrack();
-  track.name = "Melody";
+  const comp = audioCtx.createDynamicsCompressor();
+  comp.threshold.value = -20;
+  comp.knee.value = 24;
+  comp.ratio.value = 8;
+  comp.attack.value = 0.003;
+  comp.release.value = 0.25;
 
-  // Use seconds -> ticks with 480ppq default
-  const ppq = midi.header.ppq;
+  const formant = audioCtx.createBiquadFilter();
+  formant.type = "bandpass";
+  formant.frequency.value = 900;
+  formant.Q.value = 6;
+
+  formant.connect(comp);
+  comp.connect(out);
+
+  const nodes = { out, formant, comp };
+
+  function playNote({ midi, startTime, duration, velocity = 0.8, vibrato = 0.0 }) {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+
+    osc.type = "sawtooth";
+    const freq = midiToFreq(midi);
+
+    // vibrato via detune LFO
+    let lfo, lfoGain;
+    if (vibrato > 0) {
+      lfo = audioCtx.createOscillator();
+      lfo.type = "sine";
+      lfo.frequency.value = 6.0;
+      lfoGain = audioCtx.createGain();
+      lfoGain.gain.value = 12 * vibrato; // cents
+      lfo.connect(lfoGain);
+      lfoGain.connect(osc.detune);
+      lfo.start(startTime);
+      lfo.stop(startTime + duration + 0.1);
+    }
+
+    osc.frequency.setValueAtTime(freq, startTime);
+
+    // Envelope
+    const a = 0.02;
+    const d = 0.08;
+    const s = 0.5;
+    const r = 0.12;
+    const peak = clamp(velocity, 0, 1) * 0.45;
+
+    gain.gain.setValueAtTime(0.0001, startTime);
+    gain.gain.exponentialRampToValueAtTime(peak, startTime + a);
+    gain.gain.exponentialRampToValueAtTime(peak * s, startTime + a + d);
+    gain.gain.setValueAtTime(peak * s, startTime + Math.max(0, duration - r));
+    gain.gain.exponentialRampToValueAtTime(0.0001, startTime + duration);
+
+    osc.connect(gain);
+    gain.connect(nodes.formant);
+
+    osc.start(startTime);
+    osc.stop(startTime + duration + 0.05);
+  }
+
+  return { ...nodes, playNote };
+}
+
+// -------------------------------
+// Pure JS MIDI Export (SMF Type 1, single track)
+// -------------------------------
+function writeVarLen(value) {
+  // variable-length quantity
+  let buffer = value & 0x7f;
+  const bytes = [];
+  while ((value >>= 7)) {
+    buffer <<= 8;
+    buffer |= (value & 0x7f) | 0x80;
+  }
+  while (true) {
+    bytes.push(buffer & 0xff);
+    if (buffer & 0x80) buffer >>= 8;
+    else break;
+  }
+  return bytes;
+}
+
+function strBytes(s) {
+  return Array.from(s).map((c) => c.charCodeAt(0) & 0xff);
+}
+
+function u16be(n) {
+  return [(n >> 8) & 0xff, n & 0xff];
+}
+
+function u32be(n) {
+  return [(n >> 24) & 0xff, (n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff];
+}
+
+function songToMidiBytes(song) {
+  const ppq = 480;
   const tempo = song.tempo;
+  const microPerQuarter = Math.round(60000000 / tempo);
+
+  // Convert seconds to ticks
   const secToTicks = (sec) => Math.round((sec * tempo * ppq) / 60);
+
+  // Build events (delta-time sorted)
+  const events = [];
+
+  // Meta: Tempo
+  events.push({ t: 0, bytes: [0xff, 0x51, 0x03, (microPerQuarter >> 16) & 0xff, (microPerQuarter >> 8) & 0xff, microPerQuarter & 0xff] });
+
+  // Meta: Time signature
+  const [nn, dd] = song.timeSig.split("/").map((x) => parseInt(x, 10));
+  const ddPow = Math.round(Math.log2(dd)); // 4->2, 8->3
+  events.push({ t: 0, bytes: [0xff, 0x58, 0x04, nn & 0xff, ddPow & 0xff, 24, 8] });
+
+  // Program change (lead)
+  events.push({ t: 0, bytes: [0xc0, 0x52] }); // synth lead-ish
 
   for (const n of song.melody) {
     if (n.type !== "note") continue;
-    track.addNote({
-      midi: n.midi,
-      time: secToTicks(n.t) / ppq, // Midi lib uses "beats" by default when given number; but time is in seconds if header? safer use seconds? We'll keep beats:
-      // Actually @tonejs/midi expects "time" in seconds if you set tempo? It's in seconds in docs examples.
-      // We'll use seconds directly:
-      time: n.t,
-      duration: n.dur,
-      velocity: clamp(n.vel, 0, 1),
-    });
+    const tOn = secToTicks(n.t);
+    const tOff = secToTicks(n.t + n.dur);
+    const vel = clamp(Math.round((n.vel ?? 0.75) * 127), 1, 127);
+
+    events.push({ t: tOn, bytes: [0x90, n.midi & 0x7f, vel] }); // note on ch0
+    events.push({ t: tOff, bytes: [0x80, n.midi & 0x7f, 0] }); // note off
   }
 
-  return midi;
+  // Sort by time, ensure note-offs first when same time
+  events.sort((a, b) => (a.t - b.t) || ((a.bytes[0] & 0xf0) === 0x80 ? -1 : 1));
+
+  // Track chunk data
+  let lastT = 0;
+  const trackData = [];
+  for (const ev of events) {
+    const delta = Math.max(0, ev.t - lastT);
+    trackData.push(...writeVarLen(delta), ...ev.bytes);
+    lastT = ev.t;
+  }
+  // End of track
+  trackData.push(0x00, 0xff, 0x2f, 0x00);
+
+  // Header chunk (MThd)
+  const header = [
+    ...strBytes("MThd"),
+    ...u32be(6),
+    ...u16be(1), // format 1
+    ...u16be(1), // 1 track
+    ...u16be(ppq),
+  ];
+
+  // Track chunk (MTrk)
+  const track = [...strBytes("MTrk"), ...u32be(trackData.length), ...trackData];
+
+  return new Uint8Array([...header, ...track]);
 }
 
+// -------------------------------
+// Download helpers
+// -------------------------------
 function downloadBlob(blob, filename) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -373,256 +476,81 @@ function downloadBlob(blob, filename) {
   document.body.appendChild(a);
   a.click();
   a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-
-async function renderSongToWav(song, synthPreset = "basic") {
-  // Render with OfflineAudioContext using Tone.Offline
-  const duration = song.melody.length
-    ? song.melody[song.melody.length - 1].t + song.melody[song.melody.length - 1].dur + 0.5
-    : 5;
-
-  const buffer = await Tone.Offline(async ({ transport }) => {
-    const synth =
-      synthPreset === "vocal"
-        ? new Tone.FormantSynth().toDestination()
-        : new Tone.PolySynth(Tone.Synth).toDestination();
-
-    transport.bpm.value = song.tempo;
-
-    for (const n of song.melody) {
-      if (n.type !== "note") continue;
-      const freq = Tone.Frequency(n.midi, "midi");
-      synth.triggerAttackRelease(freq, n.dur, n.t, clamp(n.vel, 0, 1));
-    }
-
-    transport.start(0);
-  }, duration);
-
-  // Convert AudioBuffer to WAV (minimal)
-  const wav = audioBufferToWav(buffer.get());
-  return new Blob([wav], { type: "audio/wav" });
-}
-
-function audioBufferToWav(audioBuffer) {
-  const numCh = audioBuffer.numberOfChannels;
-  const sampleRate = audioBuffer.sampleRate;
-  const format = 1; // PCM
-  const bitDepth = 16;
-
-  let interleaved;
-  if (numCh === 2) {
-    const l = audioBuffer.getChannelData(0);
-    const r = audioBuffer.getChannelData(1);
-    interleaved = interleave(l, r);
-  } else {
-    interleaved = audioBuffer.getChannelData(0);
-  }
-
-  const byteRate = (sampleRate * numCh * bitDepth) / 8;
-  const blockAlign = (numCh * bitDepth) / 8;
-  const buffer = new ArrayBuffer(44 + interleaved.length * 2);
-  const view = new DataView(buffer);
-
-  writeString(view, 0, "RIFF");
-  view.setUint32(4, 36 + interleaved.length * 2, true);
-  writeString(view, 8, "WAVE");
-  writeString(view, 12, "fmt ");
-  view.setUint32(16, 16, true);
-  view.setUint16(20, format, true);
-  view.setUint16(22, numCh, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, byteRate, true);
-  view.setUint16(32, blockAlign, true);
-  view.setUint16(34, bitDepth, true);
-  writeString(view, 36, "data");
-  view.setUint32(40, interleaved.length * 2, true);
-
-  floatTo16BitPCM(view, 44, interleaved);
-  return buffer;
-
-  function writeString(view, offset, str) {
-    for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
-  }
-  function interleave(inputL, inputR) {
-    const length = inputL.length + inputR.length;
-    const result = new Float32Array(length);
-    let index = 0;
-    let inputIndex = 0;
-    while (index < length) {
-      result[index++] = inputL[inputIndex];
-      result[index++] = inputR[inputIndex];
-      inputIndex++;
-    }
-    return result;
-  }
-  function floatTo16BitPCM(output, offset, input) {
-    for (let i = 0; i < input.length; i++, offset += 2) {
-      const s = clamp(input[i], -1, 1);
-      output.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
-    }
-  }
+  setTimeout(() => URL.revokeObjectURL(url), 1500);
 }
 
 // -------------------------------
-// Backend helpers (optional)
-// -------------------------------
-async function postJson(url, body) {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`${res.status} ${res.statusText} ${text}`.trim());
-  }
-  return res.json();
-}
-
-// -------------------------------
-// "100 features" toggles (stubs)
+// Feature stubs list (~100)
 // -------------------------------
 const FEATURE_STUBS = [
-  // Composition & structure
-  "Song sections (Intro/Verse/Chorus/Bridge/Outro)",
-  "Multiple choruses + key change",
-  "Tempo map (rit./accel.)",
-  "Swing / groove templates",
-  "Polyrhythms (3:2 / 5:4)",
-  "Odd meters (5/4, 7/8, 11/8)",
-  "Syncopation intensity",
-  "Humanize timing/velocity",
-  "Call-and-response backing vocals",
-  "Counter-melody generator",
-  // Harmony
-  "Chord progression generator",
-  "Secondary dominants",
-  "Modal interchange",
-  "Borrowed chords",
-  "Jazz reharmonization",
-  "Voice leading optimization",
-  "Bassline generator",
-  "Arpeggiator",
-  "Pad / strings arrangement",
-  "Guitar strumming patterns",
-  // Sound & mix
-  "Instrument presets",
-  "Reverb / delay",
-  "Sidechain pumping",
-  "EQ presets",
-  "Compressor presets",
-  "Limiter on master",
-  "Stereo width control",
-  "Auto-pan",
-  "Lo-fi vinyl effect",
-  "Tape saturation",
-  // Lyrics & vocals
-  "Lyric syllable alignment",
-  "Rhyme suggestions",
-  "Alliteration suggestions",
-  "Japanese mora-aware spacing",
-  "Pitch contour from sentiment",
-  "Vibrato control (synth)",
-  "Breath/noise layer",
-  "TTS voice selector",
-  "TTS style instructions",
-  "Pronunciation hints",
-  // Output
-  "MIDI export",
-  "WAV export",
-  "MusicXML export (stub)",
-  "PDF score export (stub)",
-  "Chord chart export",
-  "Lyrics + timestamps (LRC)",
-  "Stems export (stub)",
-  "Loop export",
-  "A/B versions",
-  "Version history (local)",
-  // UX
-  "Undo/redo",
-  "Autosave",
-  "Templates (genre presets)",
-  "Random seed lock",
-  "Share link (stub)",
-  "Keyboard shortcuts",
-  "Dark mode",
-  "Metronome",
-  "Count-in",
-  "Loop playback",
-  // AI / advanced
-  "AI song blueprint (JSON)",
-  "AI melody refinement",
-  "AI chord reharm",
-  "AI arrangement",
-  "AI mixing notes",
-  "AI cover art (stub)",
-  "AI title generator",
-  "AI genre classifier",
-  "AI vocal coach tips",
-  "Realtime voice agent (stub)",
-  // More stubs to approach ~100
-  "Scale selection",
-  "Key detection (from melody)",
-  "Drum pattern generator",
-  "Hi-hat groove control",
-  "Fill generator",
-  "Breakdowns",
-  "Drop builder",
-  "EDM risers",
-  "Orchestration presets",
-  "Chord extensions",
-  "Strum velocity",
-  "Fingerstyle patterns",
-  "Piano voicings",
-  "Brass stabs",
-  "Synth lead glide",
-  "Portamento",
-  "Microtiming per instrument",
-  "Probability-based motifs",
-  "Theme development",
-  "Motif repetition control",
-  "Melody contour options",
-  "Range limits per voice",
-  "Key change at final chorus",
-  "Modulation options",
-  "Lyric-to-mood mapping",
-  "Emotion curve over sections",
-  "Dynamic curve automation",
-  "Automation lanes UI (stub)",
-  "Spectrogram view (stub)",
-  "MIDI import (stub)",
-  "Drag/drop notes (stub)",
-  "Piano roll editor (stub)",
-  "Quantize grid selector",
-  "Triplet grid",
-  "Tuplet support (stub)",
-  "Chord detector (stub)",
-  "Lyrics karaoke view",
-  "BPM tapper",
-  "Click track export",
-  "Project export/import (JSON)",
-  "Cloud sync (stub)",
-  "Collaboration (stub)",
-  "Plugin hosting (stub)",
-  "Custom instrument sampler (stub)",
-  "IR reverb loader (stub)",
-  "Pitch correction (stub)",
-  "Formant shifting (stub)",
-  "Multi-language lyrics",
-  "Romanization helper",
-  "Furigana helper",
-  "User dictionaries",
-  "Per-word stress (EN) (stub)",
-  "Per-mora accents (JP) (stub)",
-  "TTS caching",
-  "Offline mode",
-  "Progressive rendering",
-  "Error reporting",
-  "Telemetry (opt-in)",
-  "Accessibility: ARIA labels",
-  "Accessibility: font scaling",
-  "Localization (i18n) (stub)",
+  "Intro/Verse/Chorus/Bridge/Outro 自動構成",
+  "複数コーラス + 終盤キー上げ",
+  "テンポ変化（rit./accel.）",
+  "スウィング/グルーヴテンプレ",
+  "ポリリズム(3:2/5:4)スタブ",
+  "変拍子(5/4,7/8,11/8)",
+  "シンコペーション強度",
+  "タイミング/ベロシティ人間味",
+  "合いの手（掛け合い）スタブ",
+  "対旋律（カウンターメロ）スタブ",
+  "コード進行自動生成",
+  "セカンダリードミナント スタブ",
+  "モーダルインターチェンジ スタブ",
+  "借用和音 スタブ",
+  "ジャズ風リハモ スタブ",
+  "ベースライン スタブ",
+  "アルペジエータ スタブ",
+  "パッド/ストリングス スタブ",
+  "ギター・ストローク スタブ",
+  "リバーブ/ディレイ スタブ",
+  "サイドチェイン スタブ",
+  "EQ/コンプ/リミッタ スタブ",
+  "ステレオ幅/オートパン スタブ",
+  "Lo-fi/Vinyl/Tape スタブ",
+  "歌詞シラブル整列（簡易）",
+  "韻・脚韻提案 スタブ",
+  "オールiteration スタブ",
+  "日本語モーラ対応 スタブ",
+  "感情→ピッチ輪郭 スタブ",
+  "ビブラート制御",
+  "ブレス/ノイズ レイヤ スタブ",
+  "TTS声選択（本格はサーバ）",
+  "発音ヒント スタブ",
+  "MIDI出力（実装済）",
+  "MusicXML/PDF 譜面 スタブ",
+  "コード譜出力 スタブ",
+  "歌詞タイムスタンプ(LRC)スタブ",
+  "ステム書き出し スタブ",
+  "A/Bバージョン",
+  "履歴（ローカル）スタブ",
+  "テンプレ（ジャンル）スタブ",
+  "シード固定/ランダム",
+  "ショートカット スタブ",
+  "ダークモード スタブ",
+  "メトロノーム スタブ",
+  "カウントイン スタブ",
+  "ループ再生 スタブ",
+  "MIDIインポート スタブ",
+  "ピアノロール スタブ",
+  "ドラッグで音符編集 スタブ",
+  "クオンタイズグリッド",
+  "3連符グリッド スタブ",
+  "タプレット スタブ",
+  "コード検出 スタブ",
+  "カラオケ表示 スタブ",
+  "BPMタップ",
+  "プロジェクトJSON保存（実装済）",
+  "クラウド同期 スタブ",
+  "コラボ スタブ",
+  "Sampler/IR Reverb スタブ",
+  "ピッチ補正 スタブ",
+  "フォルマントシフト スタブ",
+  "多言語歌詞",
+  "ローマ字/ふりがな スタブ",
+  "ユーザー辞書 スタブ",
+  "アクセシビリティ（ARIA）",
+  "フォント拡大 スタブ",
+  "i18n スタブ",
 ];
 
 // -------------------------------
@@ -630,126 +558,41 @@ const FEATURE_STUBS = [
 // -------------------------------
 export default function App() {
   const [lyrics, setLyrics] = useState("風吹けば 夢が揺れて\n君の声が 夜を照らす\n");
-  const [useAI, setUseAI] = useState(false);
-  const [useTTS, setUseTTS] = useState(false);
-  const [voice, setVoice] = useState("marin");
-  const [ttsStyle, setTtsStyle] = useState("Sing gently, clear consonants, Japanese lyrics.");
   const [tempo, setTempo] = useState(110);
   const [timeSig, setTimeSig] = useState("4/4");
   const [keyPreset, setKeyPreset] = useState(KEY_PRESETS[0].name);
-  const [complexity, setComplexity] = useState(0.6);
-  const [swing, setSwing] = useState(0.1);
+  const [complexity, setComplexity] = useState(0.62);
+  const [swing, setSwing] = useState(0.12);
   const [range, setRange] = useState(14);
   const [seed, setSeed] = useState(42);
   const [status, setStatus] = useState("");
   const [song, setSong] = useState(() =>
     localGenerateSong({
       lyrics: "風吹けば 夢が揺れて\n君の声が 夜を照らす\n",
-      settings: { tempo: 110, timeSig: "4/4", keyTonic: "C", keyMode: "major", complexity: 0.6, swing: 0.1, range: 14, seed: 42 },
+      settings: { tempo: 110, timeSig: "4/4", keyTonic: "C", keyMode: "major", complexity: 0.62, swing: 0.12, range: 14, seed: 42 },
     })
   );
 
   const [isPlaying, setIsPlaying] = useState(false);
-  const synthRef = useRef(null);
-  const partRef = useRef(null);
-  const ttsAudioRef = useRef(null);
-  const notationRef = useRef(null);
 
   const selectedKey = useMemo(() => KEY_PRESETS.find((k) => k.name === keyPreset) || KEY_PRESETS[0], [keyPreset]);
 
-  // Render notation when song changes
-  useEffect(() => {
-    try {
-      renderNotation(notationRef.current, song);
-    } catch (e) {
-      // ignore
-    }
-  }, [song]);
+  // WebAudio refs
+  const audioCtxRef = useRef(null);
+  const stopRef = useRef({ stopAt: 0, timers: [] });
 
-  // Initialize synth once
   useEffect(() => {
-    synthRef.current = new Tone.PolySynth(Tone.Synth, {
-      oscillator: { type: "sawtooth" },
-      envelope: { attack: 0.01, decay: 0.1, sustain: 0.3, release: 0.25 },
-    }).toDestination();
-
     return () => {
+      // cleanup on unmount
       try {
-        synthRef.current?.dispose?.();
+        stopPlayback();
+        audioCtxRef.current?.close?.();
       } catch {}
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const stop = async () => {
-    try {
-      Tone.Transport.stop();
-      Tone.Transport.cancel(0);
-      partRef.current?.dispose?.();
-      partRef.current = null;
-      setIsPlaying(false);
-      if (ttsAudioRef.current) {
-        ttsAudioRef.current.pause();
-        ttsAudioRef.current.currentTime = 0;
-      }
-    } catch {}
-  };
-
-  const schedulePlayback = async (theSong) => {
-    await Tone.start();
-    await stop();
-
-    Tone.Transport.bpm.value = theSong.tempo;
-
-    // Swing: Tone has swing based on 8th-notes
-    Tone.Transport.swing = clamp(theSong.swing, 0, 1);
-    Tone.Transport.swingSubdivision = "8n";
-
-    const events = theSong.melody
-      .filter((n) => n.type === "note")
-      .map((n) => ({
-        time: n.t,
-        midi: n.midi,
-        dur: n.dur,
-        vel: clamp(n.vel ?? 0.8, 0, 1),
-      }));
-
-    const synth = synthRef.current;
-    const part = new Tone.Part((time, value) => {
-      const freq = Tone.Frequency(value.midi, "midi");
-      synth.triggerAttackRelease(freq, value.dur, time, value.vel);
-    }, events);
-
-    part.start(0);
-    partRef.current = part;
-
-    // Optional TTS overlay (not pitched singing; it's speech / "sing-like" prompt)
-    if (useTTS) {
-      try {
-        setStatus("TTS生成中…");
-        const tts = await postJson("/api/tts", { text: lyrics, voice, style: ttsStyle });
-        const audio = new Audio();
-        if (tts.audioUrl) {
-          audio.src = tts.audioUrl;
-        } else if (tts.audioBase64 && tts.mime) {
-          audio.src = `data:${tts.mime};base64,${tts.audioBase64}`;
-        } else {
-          throw new Error("Invalid /api/tts response");
-        }
-        ttsAudioRef.current = audio;
-        // start roughly together with transport
-        audio.currentTime = 0;
-        audio.play().catch(() => {});
-        setStatus("");
-      } catch (e) {
-        setStatus(`TTS失敗: ${e.message}`);
-      }
-    }
-
-    Tone.Transport.start("+0.05");
-    setIsPlaying(true);
-  };
-
-  const generate = async () => {
+  const generate = () => {
     setStatus("生成中…");
     try {
       const settings = {
@@ -762,19 +605,8 @@ export default function App() {
         range,
         seed,
       };
-
-      let nextSong = null;
-
-      if (useAI) {
-        // Expect a backend that returns a full blueprint
-        nextSong = await postJson("/api/generate-song", { lyrics, settings });
-        // minimal validation fallback
-        if (!nextSong?.melody?.length) nextSong = localGenerateSong({ lyrics, settings });
-      } else {
-        nextSong = localGenerateSong({ lyrics, settings });
-      }
-
-      setSong(nextSong);
+      const next = localGenerateSong({ lyrics, settings });
+      setSong(next);
       setStatus("生成完了");
       setTimeout(() => setStatus(""), 900);
     } catch (e) {
@@ -782,48 +614,136 @@ export default function App() {
     }
   };
 
+  const ensureAudioCtx = async () => {
+    if (!audioCtxRef.current) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      audioCtxRef.current = new AC();
+    }
+    if (audioCtxRef.current.state === "suspended") {
+      await audioCtxRef.current.resume();
+    }
+    return audioCtxRef.current;
+  };
+
+  const stopPlayback = () => {
+    try {
+      const s = stopRef.current;
+      s.stopAt = 0;
+      if (s.timers?.length) {
+        for (const id of s.timers) clearTimeout(id);
+      }
+      s.timers = [];
+      setIsPlaying(false);
+    } catch {}
+  };
+
   const play = async () => {
-    await schedulePlayback(song);
+    try {
+      const ctx = await ensureAudioCtx();
+      stopPlayback();
+
+      const startAt = ctx.currentTime + 0.05;
+      const singer = createSingerSynth(ctx);
+
+      // master out
+      const master = ctx.createGain();
+      master.gain.value = 0.95;
+      singer.out.connect(master);
+      master.connect(ctx.destination);
+
+      // Swing: delay odd eighths by swing amount (0..1 mapped to up to 40% of 8th)
+      const [beatsPerBar, beatUnit] = song.timeSig.split("/").map((x) => parseInt(x, 10));
+      const beatSeconds = 60 / song.tempo;
+      const eighthSeconds = beatSeconds * (4 / beatUnit) * 0.5;
+      const swingDelay = clamp(song.swing ?? 0, 0, 1) * eighthSeconds * 0.4;
+
+      // "Vowel-ish" formant movement based on lyric (very rough)
+      const setFormantFromText = (txt, at) => {
+        const vowels = (txt || "").match(/[あいうえおアイウエオaeiou]/gi);
+        const v = vowels && vowels.length ? vowels[0].toLowerCase() : "a";
+        const map = {
+          a: 900,
+          i: 1200,
+          u: 700,
+          e: 1000,
+          o: 800,
+          "あ": 900,
+          "い": 1200,
+          "う": 700,
+          "え": 1000,
+          "お": 800,
+          "ア": 900,
+          "イ": 1200,
+          "ウ": 700,
+          "エ": 1000,
+          "オ": 800,
+        };
+        const f = map[v] ?? 900;
+        singer.formant.frequency.setTargetAtTime(f, at, 0.02);
+      };
+
+      for (const n of song.melody) {
+        if (n.type !== "note") continue;
+
+        // find eighth index to apply swing on odd
+        const eighthIndex = Math.round(n.t / eighthSeconds);
+        const isOdd = eighthIndex % 2 === 1;
+        const t = startAt + n.t + (isOdd ? swingDelay : 0);
+
+        setFormantFromText(n.lyric, t);
+
+        const vibrato = 0.2 + clamp(song.swing ?? 0, 0, 1) * 0.15; // gentle vibrato
+        singer.playNote({ midi: n.midi, startTime: t, duration: Math.max(0.03, n.dur * 0.98), velocity: n.vel ?? 0.75, vibrato });
+      }
+
+      const totalDur = song.melody.length ? song.melody[song.melody.length - 1].t + song.melody[song.melody.length - 1].dur : 2;
+      setIsPlaying(true);
+
+      const timerId = setTimeout(() => {
+        stopPlayback();
+      }, Math.ceil((totalDur + 0.2) * 1000));
+      stopRef.current.timers.push(timerId);
+    } catch (e) {
+      setStatus(`再生失敗: ${e.message}`);
+    }
   };
 
   const exportMidi = () => {
     try {
-      const midi = songToMidi(song);
-      const bytes = midi.toArray();
+      const bytes = songToMidiBytes(song);
       downloadBlob(new Blob([bytes], { type: "audio/midi" }), "song.mid");
     } catch (e) {
       setStatus(`MIDI出力失敗: ${e.message}`);
     }
   };
 
-  const exportWav = async () => {
+  const exportJson = () => {
     try {
-      setStatus("WAVレンダリング中…");
-      const wavBlob = await renderSongToWav(song, "vocal");
-      downloadBlob(wavBlob, "song.wav");
-      setStatus("");
+      downloadBlob(new Blob([JSON.stringify(song, null, 2)], { type: "application/json" }), "song.json");
     } catch (e) {
-      setStatus(`WAV出力失敗: ${e.message}`);
+      setStatus(`JSON出力失敗: ${e.message}`);
     }
   };
 
-  const copySongJson = async () => {
+  const copyScore = async () => {
     try {
-      await navigator.clipboard.writeText(JSON.stringify(song, null, 2));
-      setStatus("JSONをコピーしました");
+      await navigator.clipboard.writeText(songToTextScore(song, 8));
+      setStatus("譜面テキストをコピーしました");
       setTimeout(() => setStatus(""), 900);
-    } catch (e) {
-      setStatus("コピー失敗");
+    } catch {
+      setStatus("コピー失敗（権限/HTTPSの可能性）");
     }
   };
+
+  const scoreText = useMemo(() => songToTextScore(song, 8), [song]);
 
   return (
-    <div style={{ fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", padding: 16, maxWidth: 1100, margin: "0 auto" }}>
-      <h1 style={{ margin: "8px 0 4px" }}>Lyrics → Rhythm Song Maker</h1>
-      <p style={{ margin: "0 0 16px", opacity: 0.8 }}>
-        歌詞を入れると「メロディ・リズム・簡易伴奏」を生成して再生します。楽譜（簡易）とMIDI/WAV書き出しもできます。
+    <div style={{ fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", padding: 16, maxWidth: 1150, margin: "0 auto" }}>
+      <h1 style={{ margin: "8px 0 4px" }}>Lyrics → Rhythm Song Maker（App.js単体版）</h1>
+      <p style={{ margin: "0 0 16px", opacity: 0.85, lineHeight: 1.45 }}>
+        追加ライブラリなしで動く版です（<b>tone / vexflow / midiライブラリ不要</b>）。
         <br />
-        ※ブラウザだけで「AIが歌う」品質に到達するのは難しいため、このデモでは <b>合成音(メロディ)</b> + <b>TTS音声</b> の重ね合わせで近い体験を作ります。
+        「AIが歌う」っぽさは WebAudio の<b>歌唱風シンセ</b>（ピッチ＋簡易フォルマント＋ビブラート）で表現しています。
       </p>
 
       <div style={{ display: "grid", gridTemplateColumns: "1.1fr 0.9fr", gap: 12 }}>
@@ -838,21 +758,11 @@ export default function App() {
           />
 
           <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
-            <button onClick={generate} style={btnStyle}>
-              生成
-            </button>
-            <button onClick={isPlaying ? stop : play} style={btnStyle}>
-              {isPlaying ? "停止" : "再生"}
-            </button>
-            <button onClick={exportMidi} style={btnStyle}>
-              MIDI出力
-            </button>
-            <button onClick={exportWav} style={btnStyle}>
-              WAV出力
-            </button>
-            <button onClick={copySongJson} style={btnStyle}>
-              JSONコピー
-            </button>
+            <button onClick={generate} style={btnStyle}>生成</button>
+            <button onClick={isPlaying ? stopPlayback : play} style={btnStyle}>{isPlaying ? "停止" : "再生"}</button>
+            <button onClick={exportMidi} style={btnStyle}>MIDI出力</button>
+            <button onClick={exportJson} style={btnStyle}>JSON出力</button>
+            <button onClick={copyScore} style={btnStyle}>譜面コピー</button>
             <button
               onClick={() => {
                 setSeed((s) => s + 1);
@@ -867,44 +777,18 @@ export default function App() {
           {status ? <div style={{ marginTop: 10, color: status.includes("失敗") ? "crimson" : "#333" }}>{status}</div> : null}
 
           <div style={{ marginTop: 14 }}>
-            <h3 style={{ margin: "10px 0 6px" }}>楽譜（先頭4小節の簡易表示）</h3>
-            <div
-              ref={notationRef}
-              id="notation"
-              style={{ border: "1px solid #eee", borderRadius: 12, padding: 8, overflowX: "auto" }}
-            />
+            <h3 style={{ margin: "10px 0 6px" }}>楽譜（簡易テキスト表示：先頭8小節）</h3>
+            <pre style={{ whiteSpace: "pre", overflowX: "auto", padding: 10, borderRadius: 12, border: "1px solid #eee", background: "#fafafa", fontSize: 12, lineHeight: 1.2 }}>
+{scoreText}
+            </pre>
+            <div style={{ fontSize: 12, opacity: 0.75 }}>
+              ●=音符 / ^ = 歌詞が乗る位置（8分グリッド）。本格譜面は MusicXML/PDF 出力を追加するとできます（今はスタブ）。
+            </div>
           </div>
         </div>
 
         <div style={{ border: "1px solid #ddd", borderRadius: 12, padding: 12 }}>
           <h2 style={{ marginTop: 0 }}>設定</h2>
-
-          <Row label="AIで複雑生成（要バックエンド）">
-            <input type="checkbox" checked={useAI} onChange={(e) => setUseAI(e.target.checked)} />
-          </Row>
-
-          <Row label="AIボイス（TTS）を重ねる（要バックエンド）">
-            <input type="checkbox" checked={useTTS} onChange={(e) => setUseTTS(e.target.checked)} />
-          </Row>
-
-          <Row label="TTS Voice">
-            <select value={voice} onChange={(e) => setVoice(e.target.value)} style={selectStyle}>
-              {["alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer", "verse", "marin", "cedar"].map((v) => (
-                <option key={v} value={v}>
-                  {v}
-                </option>
-              ))}
-            </select>
-          </Row>
-
-          <Row label="TTS Style Prompt">
-            <textarea
-              value={ttsStyle}
-              onChange={(e) => setTtsStyle(e.target.value)}
-              rows={3}
-              style={{ width: "100%", resize: "vertical", fontSize: 12, padding: 8, borderRadius: 10, border: "1px solid #ccc" }}
-            />
-          </Row>
 
           <Row label={`Tempo: ${tempo} BPM`}>
             <input type="range" min={60} max={200} value={tempo} onChange={(e) => setTempo(parseInt(e.target.value, 10))} style={{ width: "100%" }} />
@@ -925,9 +809,7 @@ export default function App() {
           <Row label="Time Signature">
             <select value={timeSig} onChange={(e) => setTimeSig(e.target.value)} style={selectStyle}>
               {["4/4", "3/4", "6/8", "5/4", "7/8"].map((ts) => (
-                <option key={ts} value={ts}>
-                  {ts}
-                </option>
+                <option key={ts} value={ts}>{ts}</option>
               ))}
             </select>
           </Row>
@@ -935,9 +817,7 @@ export default function App() {
           <Row label="Key">
             <select value={keyPreset} onChange={(e) => setKeyPreset(e.target.value)} style={selectStyle}>
               {KEY_PRESETS.map((k) => (
-                <option key={k.name} value={k.name}>
-                  {k.name}
-                </option>
+                <option key={k.name} value={k.name}>{k.name}</option>
               ))}
             </select>
           </Row>
@@ -947,29 +827,19 @@ export default function App() {
           </Row>
 
           <details style={{ marginTop: 12 }}>
-            <summary style={{ cursor: "pointer" }}>「機能100個」追加用のスタブ一覧（ON/OFF UIなし）</summary>
+            <summary style={{ cursor: "pointer" }}>「機能100個」追加用スタブ一覧</summary>
             <ul>
-              {FEATURE_STUBS.map((f, i) => (
-                <li key={i}>{f}</li>
-              ))}
+              {FEATURE_STUBS.map((f, i) => <li key={i}>{f}</li>)}
             </ul>
           </details>
 
-          <details style={{ marginTop: 10 }}>
-            <summary style={{ cursor: "pointer" }}>バックエンド実装のヒント（要サーバ）</summary>
-            <div style={{ marginTop: 8, fontSize: 13, lineHeight: 1.5, opacity: 0.9 }}>
-              <p style={{ marginTop: 0 }}>
-                <b>/api/tts</b> は OpenAI Audio API の <code>/v1/audio/speech</code> を叩くプロキシにします（ブラウザにAPIキーを置かない）。
-                返り値は <code>audioUrl</code> または <code>audioBase64</code> でOK。
-              </p>
-              <p>
-                <b>/api/generate-song</b> は「歌詞と設定 → JSONで構成/メロディ/コード」を返すようにします。JSONスキーマを厳密にして、モデルに守らせると安定します。
-              </p>
-              <p style={{ marginBottom: 0 }}>
-                このApp.jsはフロントだけでも動きます（ローカル生成）。AIを足すと「より複雑な構成」「音域・跳躍・反復テーマ」「セクション別の抑揚」などを強化できます。
-              </p>
+          <div style={{ marginTop: 12, padding: 10, borderRadius: 12, border: "1px solid #eee", background: "#fafafa" }}>
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>この版で「修正がApp.jsだけで済む」理由</div>
+            <div style={{ fontSize: 13, opacity: 0.9, lineHeight: 1.5 }}>
+              外部ライブラリ（tone/vexflow/midi）を一切importしないため、依存追加なしでビルドできます。
+              再生は Web Audio API、MIDI書き出しは純JSで実装しています。
             </div>
-          </details>
+          </div>
         </div>
       </div>
 
