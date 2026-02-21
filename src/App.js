@@ -1,74 +1,42 @@
+// App.js
+// 依存（任意）: 楽譜表示をきれいにしたい場合は abcjs を入れると便利です。
+// npm i abcjs
+// ※ abcjs が無い場合でも、ABC記譜（テキスト）として表示はされます。
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
+let ABCJS = null; // 動的ロード（入っていれば使う）
+
 /**
- * Lyrics-to-Song (single-file demo)
- * - Generates rhythmic + melodic note events from pasted lyrics
- * - Plays a synthetic "singing" voice via WebAudio (oscillator + envelope + simple formant-ish filter)
- * - Optional SpeechSynthesis overlay ("karaoke style")
- * - Creates simple sheet-music-like notation via ABC string; renders with abcjs if available (loaded dynamically)
- * - Exports: JSON (project), ABC, MIDI (very simple), WAV (offline render; best-effort)
+ * ざっくり「歌を作る」ためのミニ作曲エンジン（デモ）
+ * - 歌詞 -> トークン（音符割り当て単位）に分割
+ * - リズム（拍子/テンポ/複雑さ）を生成
+ * - メロディ（キー/スケール/複雑さ）を生成
+ * - コード進行（簡易）を生成
+ * - WebAudioで再生（メロディ＋簡易伴奏）
+ * - SpeechSynthesis で歌詞を「歌うように」読み上げ（擬似ボーカル）
  *
- * NOTE: Browser-based "singing" is approximated. True singing/TTS models require server-side ML or specialized APIs.
+ * 本格的な歌声合成（音素タイミング・ピッチ制御）はブラウザ標準だけでは難しいため、
+ * ここでは「メロディは音で鳴らす」「歌詞はTTSで同時進行で読み上げる」方式です。
  */
 
-const VERSION = "0.9.0";
-const DEFAULT_SEED = "hasei-music";
-const DEFAULT_PROJECT_NAME = "MyLyricsSong";
+const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
 
-const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-const lerp = (a, b, t) => a + (b - a) * t;
-
-// ----- Musical helpers -----
 const NOTE_NAMES_SHARP = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
-const MAJOR_STEPS = [0, 2, 4, 5, 7, 9, 11];
-const MINOR_STEPS = [0, 2, 3, 5, 7, 8, 10];
-const PENTATONIC_STEPS = [0, 2, 4, 7, 9];
-const DORIAN_STEPS = [0, 2, 3, 5, 7, 9, 10];
-const HARM_MINOR_STEPS = [0, 2, 3, 5, 7, 8, 11];
+const NOTE_TO_SEMITONE = Object.fromEntries(NOTE_NAMES_SHARP.map((n, i) => [n, i]));
 
-function noteNameToMidi(noteName = "C4") {
-  const m = /^([A-G])(#|b)?(\d+)$/.exec(noteName.trim());
-  if (!m) return 60;
-  const letter = m[1];
-  const accidental = m[2] || "";
-  const octave = parseInt(m[3], 10);
-  const base = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 }[letter];
-  let semis = base;
-  if (accidental === "#") semis += 1;
-  if (accidental === "b") semis -= 1;
-  return 12 * (octave + 1) + semis;
+function mulberry32(seed) {
+  let t = seed >>> 0;
+  return function () {
+    t += 0x6d2b79f5;
+    let r = Math.imul(t ^ (t >>> 15), 1 | t);
+    r ^= r + Math.imul(r ^ (r >>> 7), 61 | r);
+    return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
+  };
 }
 
-function midiToFreq(m) {
-  return 440 * Math.pow(2, (m - 69) / 12);
-}
-
-function midiToNoteName(m) {
-  const pc = ((m % 12) + 12) % 12;
-  const oct = Math.floor(m / 12) - 1;
-  return `${NOTE_NAMES_SHARP[pc]}${oct}`;
-}
-
-function pickScale(mode) {
-  switch (mode) {
-    case "major": return MAJOR_STEPS;
-    case "minor": return MINOR_STEPS;
-    case "pentatonic": return PENTATONIC_STEPS;
-    case "dorian": return DORIAN_STEPS;
-    case "harmonic_minor": return HARM_MINOR_STEPS;
-    default: return MAJOR_STEPS;
-  }
-}
-
-function hashToSeedInt(str) {
-  // deterministic seed from string
-  const h = cryptoSubtleHashSync(str || "");
-  return h >>> 0;
-}
-
-function cryptoSubtleHashSync(str) {
-  // A tiny sync fallback hash (FNV-1a style) to avoid async crypto in UI generation
+function hashStringToSeed(str) {
+  // シンプルなハッシュ（再現性用）
   let h = 2166136261;
   for (let i = 0; i < str.length; i++) {
     h ^= str.charCodeAt(i);
@@ -77,1387 +45,1137 @@ function cryptoSubtleHashSync(str) {
   return h >>> 0;
 }
 
-function mulberry32(seed) {
-  let t = seed >>> 0;
-  return function () {
-    t += 0x6D2B79F5;
-    let x = t;
-    x = Math.imul(x ^ (x >>> 15), x | 1);
-    x ^= x + Math.imul(x ^ (x >>> 7), x | 61);
-    return ((x ^ (x >>> 14)) >>> 0) / 4294967296;
+function midiToFreq(midi) {
+  return 440 * Math.pow(2, (midi - 69) / 12);
+}
+
+function pick(rng, arr) {
+  return arr[Math.floor(rng() * arr.length)];
+}
+
+function weightedPick(rng, items) {
+  // items: [{v, w}]
+  const sum = items.reduce((s, it) => s + it.w, 0);
+  let x = rng() * sum;
+  for (const it of items) {
+    x -= it.w;
+    if (x <= 0) return it.v;
+  }
+  return items[items.length - 1].v;
+}
+
+function isJapaneseLike(text) {
+  // ざっくり: ひらがな/カタカナ/漢字が多いなら日本語扱い
+  return /[\u3040-\u30ff\u4e00-\u9faf]/.test(text);
+}
+
+function tokenizeLyrics(lyrics) {
+  const raw = (lyrics || "").trim();
+  if (!raw) return [];
+
+  // 行ごとに扱う（フレーズ）
+  const lines = raw
+    .split(/\r?\n/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  const jp = isJapaneseLike(raw);
+
+  // 1行をトークン列へ
+  const tokenizeLine = (line) => {
+    // 句読点は軽く区切り
+    const cleaned = line.replace(/[、。,.!?！？]/g, " ").trim();
+    if (!cleaned) return [];
+
+    if (jp) {
+      // 日本語は「スペースがない」ことが多いので、文字ベース（簡易）
+      // ただし英数字/記号が混ざる場合はスペース分割を優先
+      if (/\s/.test(cleaned)) {
+        return cleaned.split(/\s+/).filter(Boolean);
+      }
+      // 連続する小書きゃゅょっ等は前に結合したいが、ここでは最小限
+      const chars = Array.from(cleaned);
+      const tokens = [];
+      for (let i = 0; i < chars.length; i++) {
+        const c = chars[i];
+        if (!c.trim()) continue;
+        // 小書き文字は前へ結合
+        if (/[ゃゅょぁぃぅぇぉャュョァィゥェォっッ]/.test(c) && tokens.length) {
+          tokens[tokens.length - 1] += c;
+        } else {
+          tokens.push(c);
+        }
+      }
+      return tokens;
+    }
+
+    // 英語などは単語ベース
+    return cleaned.split(/\s+/).filter(Boolean);
   };
-}
 
-// ----- Lyrics helpers (simple Japanese-friendly splitting) -----
-function normalizeLyrics(text) {
-  return (text || "")
-    .replace(/\r\n/g, "\n")
-    .replace(/[ \t]+/g, " ")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}
-
-function splitSections(text) {
-  // Blank line separates sections
-  const blocks = normalizeLyrics(text).split(/\n\s*\n/).filter(Boolean);
-  if (blocks.length === 0) return [{ name: "Verse", lines: [""] }];
-  return blocks.map((b, idx) => ({
-    name: idx === 0 ? "Verse" : `Section ${idx + 1}`,
-    lines: b.split("\n").map(s => s.trim()).filter(Boolean)
+  return lines.map((line) => ({
+    text: line,
+    tokens: tokenizeLine(line),
   }));
 }
 
-// Very naive mora-ish splitter for Japanese: keeps small kana with previous char.
-function splitToMoras(line) {
-  const s = (line || "").trim();
-  if (!s) return [];
-  const chars = Array.from(s);
-  const small = new Set(["ぁ","ぃ","ぅ","ぇ","ぉ","ゃ","ゅ","ょ","ゎ","ァ","ィ","ゥ","ェ","ォ","ャ","ュ","ョ","ヮ","っ","ッ","ゕ","ゖ","ゎ"]);
-  const out = [];
-  for (let i = 0; i < chars.length; i++) {
-    const c = chars[i];
-    if (small.has(c) && out.length > 0) out[out.length - 1] += c;
-    else out.push(c);
+function buildScaleSemitones(key, mode) {
+  // key: "C", "D#", etc. mode: "major" | "minor"
+  const root = NOTE_TO_SEMITONE[key] ?? 0;
+  const major = [0, 2, 4, 5, 7, 9, 11];
+  const minor = [0, 2, 3, 5, 7, 8, 10]; // natural minor
+  const pattern = mode === "minor" ? minor : major;
+  return pattern.map((x) => (x + root) % 12);
+}
+
+function nearestScaleMidi(midi, scaleSemis) {
+  // midi の音高を、近いスケール音に丸める（簡易）
+  const baseOct = Math.floor(midi / 12);
+  const sem = ((midi % 12) + 12) % 12;
+  let best = null;
+  for (const s of scaleSemis) {
+    const cand = baseOct * 12 + s;
+    const d = Math.abs(cand - midi);
+    if (best == null || d < best.d) best = { midi: cand, d };
+    // 上下オクターブも見る
+    const candUp = (baseOct + 1) * 12 + s;
+    const dUp = Math.abs(candUp - midi);
+    if (dUp < best.d) best = { midi: candUp, d: dUp };
+    const candDn = (baseOct - 1) * 12 + s;
+    const dDn = Math.abs(candDn - midi);
+    if (dDn < best.d) best = { midi: candDn, d: dDn };
   }
-  // Merge punctuation as separate tokens
-  return out.filter(x => x !== " ");
+  return best?.midi ?? midi;
 }
 
-// ----- Rhythm & melody generation -----
-function generateRhythm(moraCount, meter, complexity, rnd) {
-  // Returns array of durations in beats, length = moraCount (or less if rests inserted separately)
-  // complexity: 0..1
-  const beatsPerBar = meter === "3/4" ? 3 : 4;
-  const baseGrid = complexity < 0.35 ? 1 : (complexity < 0.7 ? 0.5 : 0.25); // quarter, eighth, 16th
-  const maxBeats = Math.max(beatsPerBar, Math.ceil(moraCount * baseGrid));
-  let remaining = maxBeats;
-  const durs = [];
-  for (let i = 0; i < moraCount; i++) {
-    // prefer small notes as complexity rises
-    const choices = complexity < 0.35
-      ? [1, 1, 2]
-      : complexity < 0.7
-        ? [0.5, 0.5, 1, 1.5]
-        : [0.25, 0.25, 0.5, 0.75, 1];
-    let d = choices[Math.floor(rnd() * choices.length)];
-    // fit remaining
-    d = Math.min(d, remaining);
-    if (d <= 0) d = baseGrid;
-    durs.push(d);
-    remaining -= d;
-    if (remaining <= 0 && i < moraCount - 1) {
-      remaining += beatsPerBar; // continue into next bar
-    }
+function chordFromDegree(key, mode, degree) {
+  // degree: 1..7 (スケール上)
+  const scaleSemis = buildScaleSemitones(key, mode);
+  const rootSemi = scaleSemis[(degree - 1) % 7];
+  // triad: degree, degree+2, degree+4
+  const thirdSemi = scaleSemis[(degree + 1) % 7];
+  const fifthSemi = scaleSemis[(degree + 3) % 7];
+
+  // ルート名だけ返し、品質はざっくり（メジャー/マイナー）推定
+  // root->third の間隔が3ならm
+  const diff = (thirdSemi - rootSemi + 12) % 12;
+  const quality = diff === 3 ? "m" : "";
+  const rootName = NOTE_NAMES_SHARP[rootSemi];
+  return { name: `${rootName}${quality}`, semis: [rootSemi, thirdSemi, fifthSemi] };
+}
+
+function progressionForStyle(style) {
+  // シンプルな王道進行テンプレ
+  switch (style) {
+    case "pop":
+      return [1, 5, 6, 4]; // I-V-vi-IV
+    case "rock":
+      return [1, 4, 5, 4]; // I-IV-V-IV
+    case "jazz":
+      return [2, 5, 1, 6]; // ii-V-I-vi
+    case "ballad":
+      return [6, 4, 1, 5]; // vi-IV-I-V
+    case "electro":
+      return [1, 6, 4, 5]; // I-vi-IV-V
+    default:
+      return [1, 5, 6, 4];
   }
-  return durs;
 }
 
-function generateContour(n, complexity, rnd) {
-  // melodic contour steps: -2..+2
-  const steps = [];
-  let cur = 0;
-  for (let i = 0; i < n; i++) {
-    const jumpBias = complexity < 0.35 ? 0.6 : (complexity < 0.7 ? 0.9 : 1.2);
-    let step = Math.round((rnd() - 0.5) * 4 * jumpBias);
-    step = clamp(step, -2, 2);
-    if (rnd() < 0.15 * (1 - complexity)) step = 0;
-    cur += step;
-    cur = clamp(cur, -6, 6);
-    steps.push(cur);
-  }
-  return steps;
-}
+function generateRhythmPattern(rng, timeSig, complexity) {
+  // 1小節内の「拍の分割」を返す（単位: 1拍=quarter）
+  // timeSig: "4/4" | "3/4"
+  const beats = timeSig === "3/4" ? 3 : 4;
 
-function chooseChordProgression(style, rnd) {
-  // Roman numerals in major-ish context
-  const bank = {
-    pop: [
-      ["I","V","vi","IV"],
-      ["vi","IV","I","V"],
-      ["I","vi","IV","V"],
-      ["I","IV","V","IV"],
-    ],
-    edm: [
-      ["i","VI","III","VII"],
-      ["i","iv","VI","V"],
-      ["i","VII","VI","VII"],
-    ],
-    ballad: [
-      ["I","iii","vi","IV"],
-      ["I","V","vi","iii","IV","I","IV","V"],
-      ["vi","V","IV","V","I"],
-    ],
-    jazzish: [
-      ["ii7","V7","Imaj7","VI7"],
-      ["ii7","V7","Imaj7","Imaj7"],
-      ["iii7","VI7","ii7","V7"],
-    ],
-    random: []
-  };
-  if (style === "random") {
-    const romans = ["I","ii","iii","IV","V","vi","vii°"];
-    const len = 4 + Math.floor(rnd() * 5);
-    return Array.from({ length: len }, () => romans[Math.floor(rnd()*romans.length)]);
-  }
-  const arr = bank[style] || bank.pop;
-  return arr[Math.floor(rnd() * arr.length)];
-}
+  // complexity: 1..10
+  const c = clamp(complexity, 1, 10);
 
-function romanToDegree(roman) {
-  // basic mapping (major scale degrees)
-  const clean = roman.replace(/[^ivIV]+/g, "");
-  const map = { I:1, II:2, III:3, IV:4, V:5, VI:6, VII:7 };
-  return map[clean.toUpperCase()] || 1;
-}
-
-function degreeToScaleMidi(rootMidi, scaleSteps, degree, octaveOffset=0) {
-  // degree 1..7 mapped into scaleSteps cyclically; not strict diatonic for modes with 5 notes
-  const idx = (degree - 1) % scaleSteps.length;
-  const oct = Math.floor((degree - 1) / scaleSteps.length);
-  return rootMidi + scaleSteps[idx] + 12 * (oct + octaveOffset);
-}
-
-function generateSongEvents({
-  lyrics,
-  seed,
-  projectName,
-  bpm,
-  meter,
-  keyRoot,
-  scaleMode,
-  chordStyle,
-  complexity,
-  swing,
-  humanize,
-  structure,
-  rangeOctaves,
-  leadOctave,
-  restProbability,
-  accentProbability,
-}) {
-  const seedInt = hashToSeedInt(seed + "|" + projectName + "|" + bpm + "|" + meter + "|" + keyRoot + "|" + scaleMode + "|" + complexity);
-  const rnd = mulberry32(seedInt);
-
-  const sections = splitSections(lyrics);
-  const beatsPerBar = meter === "3/4" ? 3 : 4;
-  const scaleSteps = pickScale(scaleMode);
-  const rootMidi = noteNameToMidi(keyRoot) + 12 * (leadOctave - 4);
-
-  const chordProg = chooseChordProgression(chordStyle, rnd);
-
-  // structure: e.g., "A A B A"
-  const tokens = (structure || "A A B A").split(/\s+/).filter(Boolean);
-  const labelToSectionIdx = (label) => {
-    if (label === "A") return 0;
-    if (label === "B") return Math.min(1, sections.length - 1);
-    if (label === "C") return Math.min(2, sections.length - 1);
-    const n = parseInt(label, 10);
-    if (!Number.isNaN(n)) return clamp(n - 1, 0, sections.length - 1);
-    return 0;
-  };
-
-  let tBeat = 0;
-  const events = [];
-  const chordEvents = [];
-
-  const totalBars = [];
-  for (let tok of tokens) totalBars.push(tok);
-
-  let chordIndex = 0;
-
-  for (let tokIdx = 0; tokIdx < totalBars.length; tokIdx++) {
-    const secIdx = labelToSectionIdx(totalBars[tokIdx]);
-    const sec = sections[secIdx] || sections[0];
-    // Flatten lines; each line becomes a phrase
-    for (const line of sec.lines) {
-      const moras = splitToMoras(line);
-      const durs = generateRhythm(moras.length, meter, complexity, rnd);
-      const contour = generateContour(moras.length, complexity, rnd);
-
-      // per-line harmonic chunk: advance progression by 1 chord per bar-ish
-      const lineBars = Math.max(1, Math.ceil(durs.reduce((a,b)=>a+b,0)/beatsPerBar));
-      for (let b = 0; b < lineBars; b++) {
-        const roman = chordProg[chordIndex % chordProg.length] || "I";
-        chordEvents.push({ tBeat: tBeat + b*beatsPerBar, durBeats: beatsPerBar, roman });
-        chordIndex++;
-      }
-
-      let localBeat = 0;
-      for (let i = 0; i < moras.length; i++) {
-        // optional rests
-        const isRest = rnd() < restProbability * (0.35 + 0.65*complexity);
-        const dur = durs[i] || 0.5;
-
-        // swing: delay offbeats
-        const swingOffset = (swing > 0 && (Math.floor((tBeat+localBeat)/0.5) % 2 === 1))
-          ? (0.5 * swing * 0.33)
-          : 0;
-
-        const start = tBeat + localBeat + swingOffset;
-
-        // choose target degree guided by chord degree
-        const activeChord = chordEvents.slice().reverse().find(c => c.tBeat <= start) || { roman: "I" };
-        const chordDegree = romanToDegree(activeChord.roman);
-        // contour -> scale degrees near chord tone
-        const baseDegree = chordDegree + contour[i];
-        const deg = clamp(baseDegree, 1, 1 + (scaleSteps.length * rangeOctaves - 1));
-        let midi = degreeToScaleMidi(rootMidi, scaleSteps, deg, 0);
-
-        // keep within range
-        const minMidi = rootMidi - 12 * Math.floor(rangeOctaves/2);
-        const maxMidi = rootMidi + 12 * Math.ceil(rangeOctaves/2);
-        while (midi < minMidi) midi += 12;
-        while (midi > maxMidi) midi -= 12;
-
-        // accents
-        const accent = rnd() < accentProbability ? 1.25 : 1.0;
-
-        // humanize time + velocity
-        const hTime = (humanize > 0) ? (rnd() - 0.5) * 0.08 * humanize : 0;
-        const hVel = (humanize > 0) ? (rnd() - 0.5) * 0.12 * humanize : 0;
-
-        events.push({
-          type: isRest ? "rest" : "note",
-          lyric: moras[i],
-          tBeat: Math.max(0, start + hTime),
-          durBeats: Math.max(0.15, dur * (isRest ? 1 : 0.98)),
-          midi,
-          vel: clamp(0.65 * accent + hVel, 0.2, 1.0),
-          line,
-          section: sec.name,
-          bar: Math.floor((tBeat + localBeat) / beatsPerBar),
-        });
-
-        localBeat += dur;
-      }
-      // small breath between lines
-      tBeat += localBeat + (0.25 + 0.25 * (1 - complexity));
-    }
-    // section spacing
-    tBeat += beatsPerBar * 0.5;
-  }
-
-  // sort by time
-  events.sort((a,b)=>a.tBeat-b.tBeat);
-
-  return {
-    version: VERSION,
-    projectName,
-    seed,
-    bpm,
-    meter,
-    keyRoot,
-    scaleMode,
-    chordStyle,
-    complexity,
-    swing,
-    humanize,
-    structure,
-    sections,
-    chordProg,
-    chordEvents,
-    events,
-    totalBeats: tBeat,
-  };
-}
-
-// ----- ABC notation (simple, monophonic) -----
-function midiToAbcNote(midi, keyRoot="C4") {
-  // ABC: middle C is C, octave markers; this is simplistic (uses sharps)
-  const name = midiToNoteName(midi); // e.g., C#4
-  const m = /^([A-G])(#)?(\d+)$/.exec(name);
-  if (!m) return "C";
-  let [_, L, sharp, octStr] = m;
-  const oct = parseInt(octStr, 10);
-  const baseOct = 4; // ABC middle octave around 4
-  let note = L;
-  if (sharp) note = "^" + note;
-
-  // ABC octave: C (oct 4) => C, oct 5 => c, oct 6 => c', oct 3 => C,
-  if (oct > baseOct) {
-    note = note.toLowerCase();
-    const marks = oct - baseOct - 1;
-    if (marks > 0) note += "'".repeat(marks);
-  } else if (oct < baseOct) {
-    const marks = baseOct - oct;
-    if (marks > 0) note += ",".repeat(marks);
-  }
-  return note;
-}
-
-function durToAbcLen(durBeats, meter) {
-  // Set L:1/8 as base; for 4/4 beat=1 => 1/4 => length 2 (because 1/8 base)
-  // For 3/4, same
-  const base = 0.5; // 1/8 note = 0.5 beat if beat=quarter
-  const units = Math.round(durBeats / base);
-  if (units === 1) return "";
-  return String(units);
-}
-
-function toABC(project) {
-  const meter = project.meter;
-  const bpm = project.bpm;
-  const title = project.projectName || "Lyrics Song";
-  const key = (project.keyRoot || "C4").replace(/\d+$/, ""); // "C"
-  const beatsPerBar = meter === "3/4" ? 3 : 4;
-
-  let abc = "";
-  abc += `X:1\n`;
-  abc += `T:${title}\n`;
-  abc += `M:${meter}\n`;
-  abc += `L:1/8\n`;
-  abc += `Q:1/4=${bpm}\n`;
-  abc += `K:${key}\n`;
-
-  let curBarBeat = 0;
-  for (const ev of project.events) {
-    if (ev.type === "rest") {
-      const len = durToAbcLen(ev.durBeats, meter);
-      abc += `z${len} `;
-      curBarBeat += ev.durBeats;
-    } else {
-      const n = midiToAbcNote(ev.midi, project.keyRoot);
-      const len = durToAbcLen(ev.durBeats, meter);
-      abc += `${n}${len} `;
-      curBarBeat += ev.durBeats;
-    }
-    if (curBarBeat >= beatsPerBar - 1e-6) {
-      abc += `|\n`;
-      curBarBeat = 0;
-    }
-  }
-  abc += `|\n`;
-  return abc;
-}
-
-// ----- MIDI export (very simple SMF Type 0, monophonic) -----
-function writeVarLen(value) {
-  let buffer = value & 0x7F;
-  while ((value >>= 7)) {
-    buffer <<= 8;
-    buffer |= ((value & 0x7F) | 0x80);
-  }
-  const out = [];
-  while (true) {
-    out.push(buffer & 0xFF);
-    if (buffer & 0x80) buffer >>= 8;
-    else break;
-  }
-  return out;
-}
-
-function toMIDI(project) {
-  const ticksPerBeat = 480;
-  const bpm = project.bpm;
-  const usPerBeat = Math.round(60000000 / bpm);
-
-  const bytes = [];
-  const pushStr = (s) => { for (let i=0;i<s.length;i++) bytes.push(s.charCodeAt(i)); };
-  const push32 = (n) => { bytes.push((n>>>24)&255,(n>>>16)&255,(n>>>8)&255,n&255); };
-  const push16 = (n) => { bytes.push((n>>>8)&255,n&255); };
-
-  // Header chunk
-  pushStr("MThd"); push32(6);
-  push16(0); // format 0
-  push16(1); // one track
-  push16(ticksPerBeat);
-
-  // Track chunk (build track bytes first)
-  const tr = [];
-  const trPush = (...arr) => tr.push(...arr);
-
-  // tempo meta
-  trPush(...writeVarLen(0), 0xFF, 0x51, 0x03, (usPerBeat>>16)&255, (usPerBeat>>8)&255, usPerBeat&255);
-  // time signature meta (approx)
-  const meter = project.meter || "4/4";
-  const [num, den] = meter.split("/").map(x=>parseInt(x,10));
-  const dd = den === 8 ? 3 : den === 4 ? 2 : den === 2 ? 1 : 2;
-  trPush(...writeVarLen(0), 0xFF, 0x58, 0x04, num&255, dd&255, 24, 8);
-
-  // program change (voice-ish)
-  trPush(...writeVarLen(0), 0xC0, 52); // Choir Aahs-ish in GM
-
-  // note events
-  const evs = project.events.filter(e=>e.type==="note").slice().sort((a,b)=>a.tBeat-b.tBeat);
-  let lastTick = 0;
-  for (const ev of evs) {
-    const startTick = Math.max(0, Math.round(ev.tBeat * ticksPerBeat));
-    const durTick = Math.max(1, Math.round(ev.durBeats * ticksPerBeat * 0.98));
-    const dt = startTick - lastTick;
-    const vel = clamp(Math.round(ev.vel * 100), 1, 127);
-
-    // note on
-    trPush(...writeVarLen(dt), 0x90, ev.midi & 127, vel);
-    // note off
-    trPush(...writeVarLen(durTick), 0x80, ev.midi & 127, 0);
-    lastTick = startTick + durTick;
-  }
-
-  // end of track
-  trPush(...writeVarLen(0), 0xFF, 0x2F, 0x00);
-
-  // Write track chunk
-  pushStr("MTrk");
-  push32(tr.length);
-  bytes.push(...tr);
-
-  return new Uint8Array(bytes);
-}
-
-// ----- WebAudio "sing voice" engine -----
-function createVoiceNode(ctx, opts) {
-  // A simple synth voice: saw + triangle mix -> bandpass-ish -> gain envelope
-  const osc1 = ctx.createOscillator();
-  const osc2 = ctx.createOscillator();
-  const gain = ctx.createGain();
-  const filter = ctx.createBiquadFilter();
-  const vibratoOsc = ctx.createOscillator();
-  const vibratoGain = ctx.createGain();
-
-  osc1.type = opts.wave1 || "sawtooth";
-  osc2.type = opts.wave2 || "triangle";
-  filter.type = "bandpass";
-  filter.Q.value = opts.q || 8;
-
-  const mix = ctx.createGain();
-  const mix2 = ctx.createGain();
-  mix.gain.value = 0.65;
-  mix2.gain.value = 0.35;
-
-  osc1.connect(mix);
-  osc2.connect(mix2);
-
-  const sum = ctx.createGain();
-  mix.connect(sum);
-  mix2.connect(sum);
-
-  sum.connect(filter);
-  filter.connect(gain);
-
-  // vibrato
-  vibratoOsc.type = "sine";
-  vibratoOsc.frequency.value = opts.vibratoHz || 5.2;
-  vibratoGain.gain.value = opts.vibratoDepth || 8; // in cents-ish, applied to detune
-  vibratoOsc.connect(vibratoGain);
-  vibratoGain.connect(osc1.detune);
-  vibratoGain.connect(osc2.detune);
-
-  gain.gain.value = 0;
-
-  const start = (when) => {
-    osc1.start(when);
-    osc2.start(when);
-    vibratoOsc.start(when);
-  };
-  const stop = (when) => {
-    try { osc1.stop(when); } catch {}
-    try { osc2.stop(when); } catch {}
-    try { vibratoOsc.stop(when); } catch {}
-  };
-
-  return {
-    input: null,
-    output: gain,
-    osc1, osc2, gain, filter,
-    start, stop
-  };
-}
-
-function vowelToFormantHz(vowel) {
-  // very rough formant center frequencies
-  const v = vowel;
-  if (/[あぁa]/i.test(v)) return 800;
-  if (/[いぃi]/i.test(v)) return 3000;
-  if (/[うぅu]/i.test(v)) return 1300;
-  if (/[えぇe]/i.test(v)) return 2300;
-  if (/[おぉo]/i.test(v)) return 900;
-  // fallback
-  return 1400;
-}
-
-function guessVowel(token) {
-  // naive mapping for Japanese kana to last vowel
-  const t = token || "";
-  const map = [
-    { re: /[かがさざただなはばぱまやらわぁ]/, v: "a" },
-    { re: /[きぎしじちぢにひびぴみりぃ]/, v: "i" },
-    { re: /[くぐすずつづぬふぶぷむゆるぅ]/, v: "u" },
-    { re: /[けげせぜてでねへべぺめれぇ]/, v: "e" },
-    { re: /[こごそぞとどのほぼぽもよろをぉ]/, v: "o" },
-    { re: /[んン]/, v: "u" },
+  // 候補: 1拍を [1] / [1/2,1/2] / [1/3,1/3,1/3] / [3/4,1/4] / [1/4,3/4] etc.
+  const beatSplits = [
+    { v: [1], w: 10 - c + 2 },
+    { v: [0.5, 0.5], w: 3 + c },
+    { v: [0.75, 0.25], w: 2 + c * 0.6 },
+    { v: [0.25, 0.75], w: 2 + c * 0.6 },
+    { v: [0.25, 0.25, 0.5], w: 1 + c * 0.8 },
+    { v: [0.5, 0.25, 0.25], w: 1 + c * 0.8 },
+    { v: [0.25, 0.25, 0.25, 0.25], w: Math.max(0.5, c - 3) },
+    { v: [1 / 3, 1 / 3, 1 / 3], w: Math.max(0.3, c - 5) },
   ];
-  for (const it of map) if (it.re.test(t)) return it.v;
-  if (/[aeiou]/i.test(t)) {
-    const m = t.match(/[aeiou]/ig);
-    return m ? m[m.length-1].toLowerCase() : "a";
-  }
-  return "a";
-}
 
-async function ensureAbcJs() {
-  if (window.ABCJS) return true;
-  // load from CDN
-  const url = "https://cdn.jsdelivr.net/npm/abcjs@6.2.3/dist/abcjs-basic-min.js";
-  await new Promise((resolve, reject) => {
-    const s = document.createElement("script");
-    s.src = url;
-    s.async = true;
-    s.onload = resolve;
-    s.onerror = reject;
-    document.head.appendChild(s);
-  });
-  return !!window.ABCJS;
-}
-
-// ----- File helpers -----
-function downloadBlob(blob, filename) {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
-}
-
-function toWavBlob(float32, sampleRate) {
-  // mono float32 [-1,1] -> 16-bit PCM WAV
-  const numSamples = float32.length;
-  const buffer = new ArrayBuffer(44 + numSamples * 2);
-  const view = new DataView(buffer);
-
-  function writeStr(offset, s) {
-    for (let i = 0; i < s.length; i++) view.setUint8(offset + i, s.charCodeAt(i));
-  }
-
-  let offset = 0;
-  writeStr(offset, "RIFF"); offset += 4;
-  view.setUint32(offset, 36 + numSamples * 2, true); offset += 4;
-  writeStr(offset, "WAVE"); offset += 4;
-  writeStr(offset, "fmt "); offset += 4;
-  view.setUint32(offset, 16, true); offset += 4;
-  view.setUint16(offset, 1, true); offset += 2; // PCM
-  view.setUint16(offset, 1, true); offset += 2; // mono
-  view.setUint32(offset, sampleRate, true); offset += 4;
-  view.setUint32(offset, sampleRate * 2, true); offset += 4;
-  view.setUint16(offset, 2, true); offset += 2;
-  view.setUint16(offset, 16, true); offset += 2;
-
-  writeStr(offset, "data"); offset += 4;
-  view.setUint32(offset, numSamples * 2, true); offset += 4;
-
-  for (let i = 0; i < numSamples; i++) {
-    const s = clamp(float32[i], -1, 1);
-    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
-    offset += 2;
-  }
-  return new Blob([buffer], { type: "audio/wav" });
-}
-
-function useLocalStorageState(key, initialValue) {
-  const [v, setV] = useState(() => {
-    try {
-      const raw = localStorage.getItem(key);
-      if (raw == null) return initialValue;
-      return JSON.parse(raw);
-    } catch {
-      return initialValue;
+  const pattern = [];
+  for (let b = 0; b < beats; b++) {
+    const split = weightedPick(rng, beatSplits);
+    // たまに休符を混ぜる（複雑さに応じて）
+    for (const d of split) {
+      const restChance = c >= 7 ? 0.08 : c >= 4 ? 0.05 : 0.03;
+      pattern.push({ durBeats: d, isRest: rng() < restChance });
     }
+  }
+  return pattern; // 小節分
+}
+
+function generateSong({
+  lyrics,
+  tempo,
+  timeSig,
+  key,
+  mode,
+  style,
+  complexity,
+  structure, // "verse-chorus" | "through"
+  seedText,
+}) {
+  const seed = hashStringToSeed(seedText || lyrics || "seed");
+  const rng = mulberry32(seed);
+
+  const lines = tokenizeLyrics(lyrics);
+  if (!lines.length) {
+    return { error: "歌詞が空です。歌詞を入力してください。" };
+  }
+
+  const beatsPerBar = timeSig === "3/4" ? 3 : 4;
+
+  // だいたいの「1トークン=1音符」だけど、長い行は小節を増やす
+  // 小節数はトークン数から推定
+  const barsPerLineBase = 2; // 最低2小節くらい
+  const maxTokensPerBar = timeSig === "3/4" ? 6 : 8; // 8分音符想定
+
+  const scaleSemis = buildScaleSemitones(key, mode);
+
+  // ボーカル域（MIDI）
+  const vocalLow = 57; // A3
+  const vocalHigh = 76; // E5
+  let currentMidi = nearestScaleMidi(64, scaleSemis); // E4付近開始
+
+  // スタイル別に「動き方」を調整
+  const stepWeight = style === "ballad" ? 9 : style === "jazz" ? 6 : 8;
+  const leapWeight = style === "jazz" ? 4 : style === "rock" ? 3 : 2;
+  const zigzagBias = style === "electro" ? 0.55 : 0.5;
+
+  // コード進行
+  const progDegrees = progressionForStyle(style);
+  const chordBars = 4; // 4小節単位でループ
+  const chordSeq = [];
+  for (let i = 0; i < 64; i++) {
+    chordSeq.push(chordFromDegree(key, mode, progDegrees[i % progDegrees.length]));
+  }
+
+  // 構成（簡易）: verse/chorus を生成して繰り返し
+  // verse: 入力の先頭半分、chorus: 全体からサビっぽく短く再構成
+  const allLineTexts = lines.map((l) => l.text);
+  const verseLines = lines.slice(0, Math.max(1, Math.ceil(lines.length * 0.6)));
+  const chorusSource = lines.slice(Math.max(0, lines.length - Math.max(1, Math.ceil(lines.length * 0.4))));
+  const chorusLines = chorusSource.length ? chorusSource : lines;
+
+  const sections =
+    structure === "verse-chorus"
+      ? [
+          { name: "Verse", lines: verseLines },
+          { name: "Chorus", lines: chorusLines },
+          { name: "Verse", lines: verseLines },
+          { name: "Chorus", lines: chorusLines },
+        ]
+      : [{ name: "Song", lines }];
+
+  // メロディイベント（時間は拍基準で後で秒へ）
+  // event: { tBeats, durBeats, midi, lyricToken, barIndex, isRest }
+  const melody = [];
+  const lyricTimeline = []; // 読み上げ用のフレーズタイミング
+
+  let tBeats = 0;
+  let barIndex = 0;
+
+  // 「複雑」ほど: リズム細かい/跳躍多め/装飾音（短いノート）追加
+  const c = clamp(complexity, 1, 10);
+  const ornamentChance = c >= 8 ? 0.18 : c >= 6 ? 0.12 : c >= 4 ? 0.08 : 0.04;
+
+  for (const sec of sections) {
+    // セクション開始でフレーズ追加（TTS）
+    lyricTimeline.push({ tBeats, text: `♪ ${sec.name}` });
+
+    for (const line of sec.lines) {
+      const tokens = line.tokens.length ? line.tokens : [line.text];
+      // 何小節使うか
+      const estBars = Math.max(barsPerLineBase, Math.ceil(tokens.length / maxTokensPerBar));
+      const bars = clamp(estBars, 2, 8);
+
+      // TTS: 行ごとにタイミング登録
+      lyricTimeline.push({ tBeats, text: line.text });
+
+      let tokenIdx = 0;
+      for (let b = 0; b < bars; b++) {
+        const pat = generateRhythmPattern(rng, timeSig, c);
+        for (const step of pat) {
+          const tok = tokenIdx < tokens.length ? tokens[tokenIdx] : ""; // 余ったら空
+          tokenIdx++;
+
+          // 休符ならノート無し
+          if (step.isRest || !tok) {
+            melody.push({
+              tBeats,
+              durBeats: step.durBeats,
+              midi: null,
+              lyricToken: tok,
+              barIndex,
+              isRest: true,
+            });
+            tBeats += step.durBeats;
+            continue;
+          }
+
+          // 次の音高を決める（ステップ/跳躍/ジグザグ）
+          const dir = rng() < zigzagBias ? (rng() < 0.5 ? -1 : 1) : 1;
+          const move = weightedPick(rng, [
+            { v: 0, w: 2 },
+            { v: 1 * dir, w: stepWeight },
+            { v: 2 * dir, w: stepWeight * 0.7 },
+            { v: 3 * dir, w: leapWeight },
+            { v: 4 * dir, w: leapWeight * 0.8 },
+            { v: 5 * dir, w: leapWeight * 0.5 },
+            { v: 7 * dir, w: Math.max(0.5, c - 7) }, // 5度跳躍（高複雑向け）
+          ]);
+
+          // スケール音に沿うように「音度移動」っぽく処理
+          // 現在midiを半音ではなく、近いスケール音へ寄せる
+          let nextMidi = currentMidi + move * 2; // ざっくり（2半音=全音）で動かす
+          nextMidi = nearestScaleMidi(nextMidi, scaleSemis);
+
+          // 範囲に収める
+          if (nextMidi < vocalLow) nextMidi += 12;
+          if (nextMidi > vocalHigh) nextMidi -= 12;
+
+          currentMidi = nextMidi;
+
+          // 装飾音（とても短い前打音）を入れることがある
+          if (rng() < ornamentChance && step.durBeats >= 0.5) {
+            const graceDur = Math.max(0.125, step.durBeats * 0.25);
+            const mainDur = step.durBeats - graceDur;
+
+            const graceMidi = nearestScaleMidi(currentMidi + (rng() < 0.5 ? -2 : 2), scaleSemis);
+
+            melody.push({
+              tBeats,
+              durBeats: graceDur,
+              midi: graceMidi,
+              lyricToken: "",
+              barIndex,
+              isRest: false,
+              isOrnament: true,
+            });
+            tBeats += graceDur;
+
+            melody.push({
+              tBeats,
+              durBeats: mainDur,
+              midi: currentMidi,
+              lyricToken: tok,
+              barIndex,
+              isRest: false,
+            });
+            tBeats += mainDur;
+          } else {
+            melody.push({
+              tBeats,
+              durBeats: step.durBeats,
+              midi: currentMidi,
+              lyricToken: tok,
+              barIndex,
+              isRest: false,
+            });
+            tBeats += step.durBeats;
+          }
+        }
+        barIndex++;
+      }
+    }
+  }
+
+  const totalBeats = tBeats;
+  const barsTotal = Math.ceil(totalBeats / beatsPerBar);
+
+  // 伴奏（簡易）: ルート+5度のパワーコード、またはジャズ風に3度も少し
+  const chords = [];
+  for (let b = 0; b < barsTotal; b++) {
+    const chord = chordSeq[b % chordBars];
+    chords.push({ bar: b, chord });
+  }
+
+  // ABC記譜（テキスト）を組み立て
+  const abc = buildABC({
+    melody,
+    chords,
+    tempo,
+    timeSig,
+    key,
+    mode,
+    title: "Auto Song",
+    beatsPerBar,
   });
-  useEffect(() => {
-    try { localStorage.setItem(key, JSON.stringify(v)); } catch {}
-  }, [key, v]);
-  return [v, setV];
+
+  return {
+    seed,
+    sections: sections.map((s) => s.name),
+    melody,
+    chords,
+    lyricTimeline,
+    beatsPerBar,
+    totalBeats,
+    tempo,
+    timeSig,
+    key,
+    mode,
+    style,
+    complexity: c,
+    abc,
+    originalLines: allLineTexts,
+  };
 }
 
-function formatTime(sec) {
-  const m = Math.floor(sec / 60);
-  const s = Math.floor(sec % 60);
-  return `${m}:${String(s).padStart(2, "0")}`;
+function buildABC({ melody, chords, tempo, timeSig, key, mode, title, beatsPerBar }) {
+  // ABCJSで表示できる程度の簡易ABC
+  // L: 1/8 を基本、durBeats(quarter) を 8分音符単位へ変換
+  // 1拍(quarter)=2*(1/8) なので dur8 = durBeats * 2
+  const meter = timeSig;
+  const K = `${key}${mode === "minor" ? "m" : ""}`;
+
+  // MIDI->ABC音名（簡易、#中心、オクターブ）
+  function midiToABC(m) {
+    // C4=60 -> C
+    const sem = ((m % 12) + 12) % 12;
+    const octave = Math.floor(m / 12) - 1; // MIDI octave
+    const name = NOTE_NAMES_SHARP[sem]; // C#
+    let abcName = "";
+    if (name.includes("#")) {
+      abcName = "^" + name[0]; // ^C
+    } else {
+      abcName = name;
+    }
+
+    // ABC: C (octave 4) を基準に、小文字で上、カンマで下
+    // ABCの厳密なオクターブ規則は複雑なので、ここでは実用優先の簡易
+    // 目安: octave 4 -> 大文字, octave 5 -> 小文字
+    if (octave >= 5) {
+      abcName = abcName.toLowerCase();
+      const ups = octave - 5;
+      abcName += "'".repeat(ups);
+    } else if (octave <= 4) {
+      // octave 4: 大文字（そのまま）
+      const downs = 4 - octave;
+      abcName += ",".repeat(downs);
+    }
+    return abcName;
+  }
+
+  function durToABC(durBeats) {
+    const dur8 = Math.round(durBeats * 2 * 8) / 8; // 1/8単位に丸め（微妙な誤差吸収）
+    // L:1/8 なので 1 = 1/8, 2 = 1/4, 4=1/2, 8=1
+    // dur8 は「8分音符何個分」相当
+    const units = Math.max(0.125, dur8);
+    if (Math.abs(units - 1) < 1e-6) return ""; // 1/8は省略
+    if (Number.isInteger(units)) return String(units);
+    // 分数表記
+    // 例: 0.5 -> /2, 1.5 -> 3/2
+    const denom = 8;
+    const num = Math.round(units * denom);
+    // できるだけ簡略化
+    const g = gcd(num, denom);
+    const n = num / g;
+    const d = denom / g;
+    if (n === 1) return `/${d}`;
+    return `${n}/${d}`;
+  }
+
+  function gcd(a, b) {
+    a = Math.abs(a);
+    b = Math.abs(b);
+    while (b) {
+      const t = a % b;
+      a = b;
+      b = t;
+    }
+    return a || 1;
+  }
+
+  // コード（小節頭に表示）
+  const chordByBar = new Map();
+  for (const c of chords) chordByBar.set(c.bar, c.chord.name);
+
+  // 小節区切りしながら書く
+  const beatsPerBarLocal = beatsPerBar;
+  let out = "";
+  let beatInBar = 0;
+  let barIndex = 0;
+
+  for (const ev of melody) {
+    // 小節先頭ならコードを付ける
+    if (Math.abs(beatInBar) < 1e-9) {
+      const ch = chordByBar.get(barIndex);
+      if (ch) out += `"${ch}"`;
+    }
+
+    if (ev.isRest || ev.midi == null) {
+      out += "z" + durToABC(ev.durBeats) + " ";
+    } else {
+      out += midiToABC(ev.midi) + durToABC(ev.durBeats) + " ";
+    }
+
+    beatInBar += ev.durBeats;
+    // 小節をまたぐ可能性もあるので while で処理
+    while (beatInBar >= beatsPerBarLocal - 1e-9) {
+      out += "| ";
+      beatInBar -= beatsPerBarLocal;
+      barIndex++;
+    }
+  }
+
+  const header = [
+    "X:1",
+    `T:${title}`,
+    `M:${meter}`,
+    "L:1/8",
+    `Q:1/4=${tempo}`,
+    `K:${K}`,
+  ].join("\n");
+
+  return `${header}\n${out.trim()}\n`;
 }
 
-// ----- Main App -----
-export default function App() {
-  // Core inputs
-  const [projectName, setProjectName] = useLocalStorageState("lyricSong.projectName", DEFAULT_PROJECT_NAME);
-  const [seed, setSeed] = useLocalStorageState("lyricSong.seed", DEFAULT_SEED);
-  const [lyrics, setLyrics] = useLocalStorageState("lyricSong.lyrics", "君の声が\n夜を照らす\n\n明日の風に\n願いをのせて");
-  const [bpm, setBpm] = useLocalStorageState("lyricSong.bpm", 110);
-  const [meter, setMeter] = useLocalStorageState("lyricSong.meter", "4/4");
-  const [keyRoot, setKeyRoot] = useLocalStorageState("lyricSong.keyRoot", "C4");
-  const [scaleMode, setScaleMode] = useLocalStorageState("lyricSong.scaleMode", "major");
-  const [chordStyle, setChordStyle] = useLocalStorageState("lyricSong.chordStyle", "pop");
+function safeCancelSpeech() {
+  try {
+    window.speechSynthesis?.cancel?.();
+  } catch {
+    // ignore
+  }
+}
 
-  const [complexity, setComplexity] = useLocalStorageState("lyricSong.complexity", 0.55);
-  const [swing, setSwing] = useLocalStorageState("lyricSong.swing", 0.15);
-  const [humanize, setHumanize] = useLocalStorageState("lyricSong.humanize", 0.35);
+function App() {
+  const [lyrics, setLyrics] = useState(
+    "風吹けば　心は\n揺れても　進むよ\n夜明けの　リズムで\n君へと　歌うよ"
+  );
 
-  const [structure, setStructure] = useLocalStorageState("lyricSong.structure", "A A B A");
-  const [rangeOctaves, setRangeOctaves] = useLocalStorageState("lyricSong.rangeOctaves", 2);
-  const [leadOctave, setLeadOctave] = useLocalStorageState("lyricSong.leadOctave", 4);
+  const [tempo, setTempo] = useState(120);
+  const [timeSig, setTimeSig] = useState("4/4");
+  const [key, setKey] = useState("C");
+  const [mode, setMode] = useState("major");
+  const [style, setStyle] = useState("pop");
+  const [complexity, setComplexity] = useState(6);
+  const [structure, setStructure] = useState("verse-chorus");
 
-  const [restProbability, setRestProbability] = useLocalStorageState("lyricSong.restProbability", 0.04);
-  const [accentProbability, setAccentProbability] = useLocalStorageState("lyricSong.accentProbability", 0.18);
+  const [seedText, setSeedText] = useState("");
+  const [autoSeed, setAutoSeed] = useState(true);
 
-  // Voice & playback
-  const [voicePreset, setVoicePreset] = useLocalStorageState("lyricSong.voicePreset", "choir");
-  const [speechOverlay, setSpeechOverlay] = useLocalStorageState("lyricSong.speechOverlay", false);
-  const [loop, setLoop] = useLocalStorageState("lyricSong.loop", false);
-  const [countInBars, setCountInBars] = useLocalStorageState("lyricSong.countInBars", 1);
-  const [metronome, setMetronome] = useLocalStorageState("lyricSong.metronome", true);
-  const [masterVol, setMasterVol] = useLocalStorageState("lyricSong.masterVol", 0.85);
+  const [voiceEnabled, setVoiceEnabled] = useState(true);
+  const [voiceRate, setVoiceRate] = useState(1.0);
+  const [voicePitch, setVoicePitch] = useState(1.1);
+  const [voiceVolume, setVoiceVolume] = useState(1.0);
 
-  const [status, setStatus] = useState("Ready");
-  const [tab, setTab] = useState("compose"); // compose | arrange | notation | export | features
+  const [generated, setGenerated] = useState(null);
+  const [error, setError] = useState("");
 
-  const [project, setProject] = useState(null);
-  const abc = useMemo(() => (project ? toABC(project) : ""), [project]);
+  const [isPlaying, setIsPlaying] = useState(false);
 
-  // playback refs
-  const audioRef = useRef(null);
-  const nodesRef = useRef({ playing: false, startTime: 0, sched: [], timer: null });
-  const [playheadSec, setPlayheadSec] = useState(0);
+  const audioRef = useRef({
+    ctx: null,
+    master: null,
+    nodes: [],
+    startTime: 0,
+    stopFlag: false,
+  });
 
-  const abcDivRef = useRef(null);
+  const abcRef = useRef(null);
 
-  // Generate project
-  useEffect(() => {
-    const p = generateSongEvents({
+  const song = useMemo(() => {
+    const res = generateSong({
       lyrics,
-      seed,
-      projectName,
-      bpm: Number(bpm),
-      meter,
-      keyRoot,
-      scaleMode,
-      chordStyle,
+      tempo: Number(tempo),
+      timeSig,
+      key,
+      mode,
+      style,
       complexity: Number(complexity),
-      swing: Number(swing),
-      humanize: Number(humanize),
       structure,
-      rangeOctaves: Number(rangeOctaves),
-      leadOctave: Number(leadOctave),
-      restProbability: Number(restProbability),
-      accentProbability: Number(accentProbability),
+      seedText: autoSeed ? "" : seedText,
     });
-    setProject(p);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lyrics, seed, projectName, bpm, meter, keyRoot, scaleMode, chordStyle, complexity, swing, humanize, structure, rangeOctaves, leadOctave, restProbability, accentProbability]);
+    return res;
+  }, [lyrics, tempo, timeSig, key, mode, style, complexity, structure, seedText, autoSeed]);
 
-  // Render ABC when tab opens
   useEffect(() => {
-    let cancelled = false;
-    async function render() {
-      if (tab !== "notation") return;
-      if (!abcDivRef.current) return;
+    if (song?.error) {
+      setError(song.error);
+      setGenerated(null);
+      return;
+    }
+    setError("");
+    setGenerated(song);
+  }, [song]);
+
+  useEffect(() => {
+    // abcjsが入っていれば使う
+    // eslint-disable-next-line global-require
+    (async () => {
       try {
-        await ensureAbcJs();
-        if (cancelled) return;
-        abcDivRef.current.innerHTML = "";
-        window.ABCJS.renderAbc(abcDivRef.current, abc, {
+        // abcjs は CommonJS/ESM差があるので安全にimport
+        const mod = await import("abcjs");
+        ABCJS = mod?.default ?? mod;
+      } catch {
+        ABCJS = null;
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
+    // 楽譜レンダリング
+    if (!generated?.abc) return;
+    if (!abcRef.current) return;
+
+    if (ABCJS?.renderAbc) {
+      try {
+        ABCJS.renderAbc(abcRef.current, generated.abc, {
           responsive: "resize",
-          add_classes: true,
-          staffwidth: 740,
         });
-      } catch (e) {
-        // fallback: show ABC text only
+      } catch {
+        // fallback: 何もしない
       }
     }
-    render();
-    return () => { cancelled = true; };
-  }, [tab, abc]);
+  }, [generated]);
 
-  function initAudio() {
-    if (audioRef.current) return audioRef.current;
-    const AudioContext = window.AudioContext || window.webkitAudioContext;
-    const ctx = new AudioContext();
-    audioRef.current = ctx;
-    return ctx;
-  }
-
-  function stopPlayback() {
-    const st = nodesRef.current;
-    if (st.timer) {
-      clearInterval(st.timer);
-      st.timer = null;
-    }
-    if (st.sched && st.sched.length) {
-      st.sched.forEach(n => {
-        try { n.stop(ctxNow(n.ctx) + 0.01); } catch {}
-      });
-    }
-    st.sched = [];
-    st.playing = false;
-    setStatus("Stopped");
-    setPlayheadSec(0);
-
-    // stop speech
-    if (speechOverlay && window.speechSynthesis) {
-      try { window.speechSynthesis.cancel(); } catch {}
-    }
-  }
-
-  function ctxNow(ctx) {
-    return ctx.currentTime;
-  }
-
-  function voiceOptions(preset) {
-    switch (preset) {
-      case "soft":
-        return { wave1: "triangle", wave2: "sine", q: 6, vibratoHz: 5.0, vibratoDepth: 6 };
-      case "bright":
-        return { wave1: "sawtooth", wave2: "square", q: 10, vibratoHz: 5.8, vibratoDepth: 10 };
-      case "robot":
-        return { wave1: "square", wave2: "square", q: 14, vibratoHz: 0.0, vibratoDepth: 0 };
-      case "choir":
-      default:
-        return { wave1: "sawtooth", wave2: "triangle", q: 8, vibratoHz: 5.2, vibratoDepth: 8 };
-    }
-  }
-
-  function scheduleMetronome(ctx, when, durSec, bpmLocal, meterLocal) {
-    if (!metronome) return;
-    const beatsPerBar = meterLocal === "3/4" ? 3 : 4;
-    const beatSec = 60 / bpmLocal;
-
-    const click = (time, strong) => {
-      const o = ctx.createOscillator();
-      const g = ctx.createGain();
-      o.type = "sine";
-      o.frequency.setValueAtTime(strong ? 1200 : 900, time);
-      g.gain.setValueAtTime(0, time);
-      g.gain.linearRampToValueAtTime(0.4 * masterVol, time + 0.001);
-      g.gain.exponentialRampToValueAtTime(0.0001, time + 0.05);
-      o.connect(g).connect(ctx.destination);
-      o.start(time);
-      o.stop(time + 0.06);
+  useEffect(() => {
+    // アンマウント時に停止
+    return () => {
+      stop();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-    const totalBeats = durSec / beatSec;
-    for (let b = 0; b < totalBeats; b++) {
-      const t = when + b * beatSec;
-      click(t, (b % beatsPerBar) === 0);
+  function ensureAudio() {
+    const st = audioRef.current;
+    if (st.ctx && st.master) return;
+
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const master = ctx.createGain();
+    master.gain.value = 0.7;
+    master.connect(ctx.destination);
+
+    st.ctx = ctx;
+    st.master = master;
+    st.nodes = [];
+  }
+
+  function scheduleTone({ t, dur, freq, type = "sine", gain = 0.12 }) {
+    const st = audioRef.current;
+    const ctx = st.ctx;
+    const master = st.master;
+    const osc = ctx.createOscillator();
+    const g = ctx.createGain();
+
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, t);
+
+    // 簡易エンベロープ
+    const a = Math.min(0.02, dur * 0.2);
+    const r = Math.min(0.06, dur * 0.4);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(gain, t + a);
+    g.gain.exponentialRampToValueAtTime(0.0001, Math.max(t + a + 0.001, t + dur - r));
+
+    osc.connect(g);
+    g.connect(master);
+
+    osc.start(t);
+    osc.stop(t + dur + 0.05);
+
+    st.nodes.push(osc, g);
+  }
+
+  function scheduleChord({ t, dur, rootMidi, styleLocal }) {
+    // 伴奏: ルート＋5度（+オクターブ）中心、jazzは3度を薄く追加
+    const st = audioRef.current;
+    if (!st.ctx) return;
+
+    const ctx = st.ctx;
+
+    const rootFreq = midiToFreq(rootMidi);
+    scheduleTone({ t, dur, freq: rootFreq, type: styleLocal === "electro" ? "sawtooth" : "triangle", gain: 0.09 });
+    scheduleTone({ t, dur, freq: rootFreq * Math.pow(2, 7 / 12), type: "triangle", gain: 0.06 });
+    scheduleTone({ t, dur, freq: rootFreq / 2, type: "sine", gain: 0.06 });
+
+    if (styleLocal === "jazz") {
+      scheduleTone({ t, dur, freq: rootFreq * Math.pow(2, 3 / 12), type: "sine", gain: 0.03 });
+      scheduleTone({ t, dur, freq: rootFreq * Math.pow(2, 10 / 12), type: "sine", gain: 0.02 });
+    }
+
+    // 軽いハイハット風ノイズ（複雑さ高いとだけ）
+    if (complexity >= 7) {
+      const noiseDur = Math.min(0.04, dur * 0.12);
+      for (let i = 0; i < 2; i++) {
+        const tt = t + i * (dur / 2);
+        const bufferSize = Math.floor(ctx.sampleRate * noiseDur);
+        const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+        const data = buffer.getChannelData(0);
+        for (let j = 0; j < bufferSize; j++) data[j] = (Math.random() * 2 - 1) * Math.exp(-j / (bufferSize / 3));
+        const src = ctx.createBufferSource();
+        src.buffer = buffer;
+        const g = ctx.createGain();
+        g.gain.value = 0.02;
+        src.connect(g);
+        g.connect(audioRef.current.master);
+        src.start(tt);
+        src.stop(tt + noiseDur);
+        audioRef.current.nodes.push(src, g);
+      }
     }
   }
 
-  function speakLyricsKaraoke(project, ctx, startWhenSec) {
-    if (!speechOverlay || !window.speechSynthesis) return;
-    // Cancel any current speech
-    try { window.speechSynthesis.cancel(); } catch {}
+  function speakTimeline(timeline, beatToSec, startAtSec) {
+    if (!voiceEnabled) return;
+    if (!window.speechSynthesis) return;
 
-    const beatSec = 60 / project.bpm;
-    const notes = project.events.filter(e => e.type === "note");
-    const chunks = [];
-    // Group into small bursts for steadier speech scheduling
-    let buf = [];
-    let lastBeat = null;
-    for (const n of notes) {
-      if (lastBeat == null) lastBeat = n.tBeat;
-      if (n.tBeat - lastBeat > 2.0 || buf.length > 18) {
-        chunks.push({ tBeat: lastBeat, text: buf.join("") });
-        buf = [];
-        lastBeat = n.tBeat;
-      }
-      buf.push(n.lyric);
-    }
-    if (buf.length) chunks.push({ tBeat: lastBeat, text: buf.join("") });
+    safeCancelSpeech();
 
-    const baseTimeMs = performance.now() + startWhenSec * 1000;
-
-    for (const ch of chunks) {
-      const u = new SpeechSynthesisUtterance(ch.text);
-      u.rate = clamp(0.9 + (project.bpm - 100) / 400, 0.7, 1.15);
-      u.pitch = clamp(1.0 + (project.complexity - 0.5) * 0.35, 0.6, 1.4);
-      u.volume = 0.8;
-
-      const tMs = baseTimeMs + ch.tBeat * beatSec * 1000;
-      const delay = Math.max(0, tMs - performance.now());
-      setTimeout(() => {
-        try { window.speechSynthesis.speak(u); } catch {}
-      }, delay);
+    // ブラウザのTTSは「未来の時刻に正確に開始」が難しいので、
+    // setTimeout でざっくり同期
+    for (const item of timeline) {
+      const delayMs = Math.max(0, (startAtSec + beatToSec(item.tBeats) - performance.now() / 1000) * 1000);
+      window.setTimeout(() => {
+        // 停止されたら発話しない
+        if (audioRef.current.stopFlag) return;
+        const u = new SpeechSynthesisUtterance(item.text);
+        u.rate = clamp(voiceRate, 0.6, 1.4);
+        u.pitch = clamp(voicePitch, 0.5, 2.0);
+        u.volume = clamp(voiceVolume, 0.0, 1.0);
+        window.speechSynthesis.speak(u);
+      }, delayMs);
     }
   }
 
   async function play() {
-    if (!project) return;
-    const ctx = initAudio();
-    await ctx.resume();
+    if (!generated || generated.error) return;
 
-    stopPlayback(); // ensure clean
+    try {
+      ensureAudio();
+      const st = audioRef.current;
+      st.stopFlag = false;
 
-    const st = nodesRef.current;
-    st.playing = true;
-    setStatus("Playing…");
+      // iOS/Chrome対策: user gesture 直後にresume
+      await st.ctx.resume();
 
-    const beatSec = 60 / project.bpm;
-    const countInBeats = (meter === "3/4" ? 3 : 4) * Number(countInBars);
-    const startWhen = ctxNow(ctx) + 0.12; // small safety
-    const musicStartWhen = startWhen + countInBeats * beatSec;
+      // 既に再生中なら一旦停止
+      stop(true);
 
-    // master gain
-    const master = ctx.createGain();
-    master.gain.value = masterVol;
-    master.connect(ctx.destination);
+      const bpm = generated.tempo;
+      const secPerBeat = 60 / bpm;
 
-    // schedule metronome (count-in + music)
-    const totalSec = (countInBeats + project.totalBeats) * beatSec;
-    scheduleMetronome(ctx, startWhen, totalSec, project.bpm, project.meter);
+      const now = st.ctx.currentTime;
+      // 少し先から開始
+      const startTime = now + 0.12;
+      st.startTime = startTime;
 
-    // schedule voice notes
-    const voicePresetOpts = voiceOptions(voicePreset);
+      // コード（小節ごと）
+      const beatsPerBar = generated.beatsPerBar;
+      for (const c of generated.chords) {
+        const tBeats = c.bar * beatsPerBar;
+        const t = startTime + tBeats * secPerBeat;
 
-    const nodes = [];
-    const notes = project.events;
-    for (const ev of notes) {
-      if (ev.type !== "note") continue;
+        // chord.semis[0] がルート半音。適当なオクターブへ（ベース域）
+        const rootSemi = c.chord.semis[0];
+        const rootMidi = 36 + rootSemi; // C2付近
+        scheduleChord({ t, dur: beatsPerBar * secPerBeat, rootMidi, styleLocal: generated.style });
+      }
 
-      const v = createVoiceNode(ctx, voicePresetOpts);
-      v.output.connect(master);
+      // メロディ
+      for (const ev of generated.melody) {
+        if (ev.isRest || ev.midi == null) continue;
+        const t = startTime + ev.tBeats * secPerBeat;
+        const dur = ev.durBeats * secPerBeat;
 
-      const f0 = midiToFreq(ev.midi);
-      const t0 = musicStartWhen + ev.tBeat * beatSec;
-      const t1 = t0 + ev.durBeats * beatSec;
+        // 装飾音は軽く、通常音は少し強め
+        const gain = ev.isOrnament ? 0.06 : 0.12;
+        const type =
+          generated.style === "electro" ? "sawtooth" : generated.style === "rock" ? "square" : "sine";
 
-      // pitch
-      v.osc1.frequency.setValueAtTime(f0, t0);
-      v.osc2.frequency.setValueAtTime(f0 * 0.995, t0);
+        scheduleTone({ t, dur, freq: midiToFreq(ev.midi), type, gain });
+      }
 
-      // formant-ish filter center based on vowel guess
-      const vowel = guessVowel(ev.lyric);
-      const form = vowelToFormantHz(vowel);
-      v.filter.frequency.setValueAtTime(form, t0);
+      // 擬似ボーカル（TTS）
+      const beatToSec = (b) => b * secPerBeat;
+      // performance.now() を基準に setTimeout するため、開始時刻を推定
+      const startAtSecWall = performance.now() / 1000 + (startTime - st.ctx.currentTime);
+      speakTimeline(generated.lyricTimeline, beatToSec, startAtSecWall);
 
-      // envelope
-      const g = v.gain.gain;
-      const a = 0.012;
-      const d = 0.05;
-      const s = 0.6 * ev.vel;
-      const r = 0.06;
+      setIsPlaying(true);
 
-      g.setValueAtTime(0.0001, t0);
-      g.linearRampToValueAtTime(0.35 * ev.vel, t0 + a);
-      g.linearRampToValueAtTime(s, Math.min(t1, t0 + a + d));
-      g.setValueAtTime(s, Math.max(t0 + a + d, t1 - r));
-      g.linearRampToValueAtTime(0.0001, t1);
-
-      v.start(t0);
-      v.stop(t1 + 0.02);
-      nodes.push({ ctx, stop: (when) => v.stop(when) });
+      // 終了判定
+      const endSec = startTime + generated.totalBeats * secPerBeat + 0.2;
+      window.setTimeout(() => {
+        if (!audioRef.current.stopFlag) {
+          setIsPlaying(false);
+        }
+      }, Math.max(0, (endSec - st.ctx.currentTime) * 1000));
+    } catch (e) {
+      setError(`再生に失敗しました: ${String(e?.message || e)}`);
+      setIsPlaying(false);
     }
+  }
 
-    st.sched = nodes;
+  function stop(soft = false) {
+    const st = audioRef.current;
+    st.stopFlag = true;
 
-    // speech overlay for "lyrics singing" feel
-    speakLyricsKaraoke(project, ctx, (musicStartWhen - performance.now()/1000) < 0 ? 0 : (musicStartWhen - ctxNow(ctx)));
+    safeCancelSpeech();
 
-    // Playhead UI timer
-    const startPerf = performance.now();
-    st.startTime = startPerf;
-    st.timer = setInterval(() => {
-      if (!st.playing) return;
-      const elapsed = (performance.now() - startPerf) / 1000;
-      const ph = Math.max(0, elapsed - countInBeats * beatSec);
-      setPlayheadSec(ph);
-      const endSec = project.totalBeats * beatSec;
-      if (ph >= endSec + 0.1) {
-        if (loop) {
-          play().catch(()=>{});
-        } else {
-          stopPlayback();
+    if (st.nodes?.length) {
+      for (const n of st.nodes) {
+        try {
+          if (n.stop) n.stop();
+        } catch {
+          // ignore
+        }
+        try {
+          if (n.disconnect) n.disconnect();
+        } catch {
+          // ignore
         }
       }
-    }, 60);
-  }
-
-  async function exportWav() {
-    if (!project) return;
-    setStatus("Rendering WAV…");
-    try {
-      const AudioContext = window.OfflineAudioContext || window.webkitOfflineAudioContext;
-      if (!AudioContext) throw new Error("OfflineAudioContext not supported.");
-
-      const sampleRate = 44100;
-      const beatSec = 60 / project.bpm;
-      const beatsPerBar = project.meter === "3/4" ? 3 : 4;
-      const countInBeats = beatsPerBar * Number(countInBars);
-      const durationSec = (countInBeats + project.totalBeats + 1) * beatSec;
-      const ctx = new AudioContext(1, Math.ceil(durationSec * sampleRate), sampleRate);
-
-      const master = ctx.createGain();
-      master.gain.value = masterVol;
-      master.connect(ctx.destination);
-
-      // render notes
-      const voicePresetOpts = voiceOptions(voicePreset);
-      const startWhen = 0.0;
-      const musicStart = startWhen + countInBeats * beatSec;
-
-      for (const ev of project.events) {
-        if (ev.type !== "note") continue;
-        const v = createVoiceNode(ctx, voicePresetOpts);
-        v.output.connect(master);
-
-        const f0 = midiToFreq(ev.midi);
-        const t0 = musicStart + ev.tBeat * beatSec;
-        const t1 = t0 + ev.durBeats * beatSec;
-
-        v.osc1.frequency.setValueAtTime(f0, t0);
-        v.osc2.frequency.setValueAtTime(f0 * 0.995, t0);
-
-        const vowel = guessVowel(ev.lyric);
-        const form = vowelToFormantHz(vowel);
-        v.filter.frequency.setValueAtTime(form, t0);
-
-        const g = v.gain.gain;
-        g.setValueAtTime(0.0001, t0);
-        g.linearRampToValueAtTime(0.35 * ev.vel, t0 + 0.012);
-        g.linearRampToValueAtTime(0.6 * ev.vel, Math.min(t1, t0 + 0.06));
-        g.setValueAtTime(0.6 * ev.vel, Math.max(t0 + 0.06, t1 - 0.06));
-        g.linearRampToValueAtTime(0.0001, t1);
-
-        v.start(t0);
-        v.stop(t1 + 0.02);
-      }
-
-      const rendered = await ctx.startRendering();
-      const ch0 = rendered.getChannelData(0);
-      const blob = toWavBlob(ch0, sampleRate);
-      downloadBlob(blob, `${project.projectName || "song"}.wav`);
-      setStatus("WAV exported.");
-    } catch (e) {
-      console.error(e);
-      setStatus("WAV export failed (browser limitation). Try MIDI/ABC/JSON.");
+      st.nodes = [];
     }
-  }
 
-  function exportJson() {
-    if (!project) return;
-    downloadBlob(new Blob([JSON.stringify(project, null, 2)], { type: "application/json" }), `${project.projectName || "song"}.json`);
-  }
-
-  function exportAbc() {
-    if (!project) return;
-    downloadBlob(new Blob([abc], { type: "text/plain" }), `${project.projectName || "song"}.abc`);
-  }
-
-  function exportMidi() {
-    if (!project) return;
-    const midiBytes = toMIDI(project);
-    downloadBlob(new Blob([midiBytes], { type: "audio/midi" }), `${project.projectName || "song"}.mid`);
+    if (!soft) {
+      // ctxを閉じると次回に作り直し必要。ここでは残す（体感を軽く）
+      // 必要なら ctx.close() に切り替え可
+    }
+    setIsPlaying(false);
   }
 
   function randomizeSeed() {
-    const s = Math.random().toString(36).slice(2, 10);
-    setSeed(s);
+    setAutoSeed(false);
+    setSeedText(String(Math.floor(Math.random() * 1e9)));
   }
 
-  function insertDemoLyrics() {
-    setLyrics("星が降る夜に\n君の名を呼んだ\n\n涙のあとに\n笑顔を描いて\n\n遠い未来へ\n手を伸ばす");
+  function copyABC() {
+    if (!generated?.abc) return;
+    navigator.clipboard?.writeText?.(generated.abc);
   }
-
-  const beatsPerBar = meter === "3/4" ? 3 : 4;
-  const totalSec = project ? (project.totalBeats * (60 / project.bpm)) : 0;
-
-  // “~100 features”: Implemented vs placeholders list (honest)
-  const featureList = useMemo(() => ([
-    { name: "歌詞入力→自動リズム生成", done: true },
-    { name: "メロディ自動生成（スケール/キー/音域）", done: true },
-    { name: "複雑さスライダー（リズム/跳躍/休符）", done: true },
-    { name: "スウィング", done: true },
-    { name: "ヒューマナイズ（タイミング/強弱）", done: true },
-    { name: "コード進行生成（pop/edm/ballad/jazzish/random）", done: true },
-    { name: "セクション構造（A A B A など）", done: true },
-    { name: "カウントイン", done: true },
-    { name: "メトロノーム", done: true },
-    { name: "ループ再生", done: true },
-    { name: "簡易“歌声”合成（WebAudio）", done: true },
-    { name: "SpeechSynthesis オーバーレイ（擬似カラオケ）", done: true },
-    { name: "ABC 楽譜出力", done: true },
-    { name: "ABCJS による楽譜レンダリング（動的ロード）", done: true },
-    { name: "MIDI エクスポート（単旋律）", done: true },
-    { name: "WAV エクスポート（OfflineAudioContext, best-effort）", done: true },
-    { name: "プロジェクトJSON保存/書き出し", done: true },
-    { name: "ローカルストレージで設定保存", done: true },
-    { name: "再生位置表示", done: true },
-
-    // placeholders toward “~100”
-    { name: "歌詞の韻/母音一致解析", done: false },
-    { name: "自動サビ判定", done: false },
-    { name: "和音（ハーモニー/コーラス）生成", done: false },
-    { name: "ベースライン生成", done: false },
-    { name: "ドラムパターン生成", done: false },
-    { name: "伴奏（アルペジオ/ストローク）", done: false },
-    { name: "MIDIインポート", done: false },
-    { name: "MusicXML出力", done: false },
-    { name: "歌詞の字幕ハイライト（単語単位）", done: false },
-    { name: "カスタムリズムパターン編集UI", done: false },
-    { name: "編集可能なピアノロール", done: false },
-    { name: "スケール外音（ブルーノート/借用和音）", done: false },
-    { name: "転調", done: false },
-    { name: "拍子変更（途中で）", done: false },
-    { name: "オートメーション（フィルタ/ボリューム）", done: false },
-    { name: "エフェクト（リバーブ/ディレイ）", done: false },
-    { name: "AIボーカロイド系合成（外部API）", done: false },
-    { name: "スタイルプリセット（J-POP/演歌/ロック等）", done: false },
-    { name: "共同編集/共有リンク", done: false },
-    { name: "プロジェクト一覧/検索", done: false },
-    { name: "アクセシビリティ強化（キーボード操作）", done: false },
-  ]), []);
 
   return (
-    <div style={{ fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", padding: 16, maxWidth: 1100, margin: "0 auto" }}>
-      <header style={{ display: "flex", gap: 12, alignItems: "baseline", justifyContent: "space-between", flexWrap: "wrap" }}>
-        <div>
-          <h1 style={{ margin: 0, fontSize: 22 }}>Lyrics → Rhythm Song Maker</h1>
-          <div style={{ opacity: 0.7, fontSize: 12 }}>App.js single-file demo · v{VERSION}</div>
-        </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-          <span style={{ fontSize: 12, opacity: 0.8 }}>Status: {status}</span>
-          <button onClick={play} style={btnPrimary}>▶ Play</button>
-          <button onClick={stopPlayback} style={btn}>■ Stop</button>
-        </div>
-      </header>
+    <div style={{ maxWidth: 980, margin: "0 auto", padding: 16, fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif" }}>
+      <h1 style={{ margin: "8px 0 4px" }}>歌詞から自動作曲（リズム重視）デモ</h1>
+      <div style={{ color: "#555", marginBottom: 12, lineHeight: 1.5 }}>
+        歌詞を入力 → リズム／メロディ／コードを自動生成して再生します。<br />
+        「歌うように」はブラウザ標準の音声合成（TTS）で擬似的に歌詞を読み上げます（本格的な歌声合成ではありません）。
+      </div>
 
-      <nav style={{ marginTop: 14, display: "flex", gap: 8, flexWrap: "wrap" }}>
-        <TabButton label="Compose" active={tab==="compose"} onClick={()=>setTab("compose")} />
-        <TabButton label="Arrange" active={tab==="arrange"} onClick={()=>setTab("arrange")} />
-        <TabButton label="Notation" active={tab==="notation"} onClick={()=>setTab("notation")} />
-        <TabButton label="Export" active={tab==="export"} onClick={()=>setTab("export")} />
-        <TabButton label="Features" active={tab==="features"} onClick={()=>setTab("features")} />
-      </nav>
+      <div style={{ display: "grid", gridTemplateColumns: "1.2fr 0.8fr", gap: 12, alignItems: "start" }}>
+        <div style={{ border: "1px solid #ddd", borderRadius: 12, padding: 12 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+            <h2 style={{ margin: 0, fontSize: 18 }}>歌詞</h2>
+            <div style={{ fontSize: 12, color: "#666" }}>
+              行ごとにフレーズ扱い（Verse/Chorus構成は設定で変更）
+            </div>
+          </div>
+          <textarea
+            value={lyrics}
+            onChange={(e) => setLyrics(e.target.value)}
+            rows={10}
+            style={{
+              width: "100%",
+              marginTop: 8,
+              padding: 10,
+              borderRadius: 10,
+              border: "1px solid #ccc",
+              outline: "none",
+              lineHeight: 1.5,
+              fontSize: 14,
+              resize: "vertical",
+            }}
+            placeholder={"歌詞を入力してください（改行でフレーズ）"}
+          />
 
-      {tab === "compose" && (
-        <section style={card}>
-          <h2 style={h2}>1) 歌詞</h2>
-          <div style={{ display: "grid", gridTemplateColumns: "1.3fr 0.7fr", gap: 12 }}>
-            <div>
-              <textarea
-                value={lyrics}
-                onChange={(e)=>setLyrics(e.target.value)}
-                rows={12}
-                style={{ width: "100%", padding: 10, fontSize: 14, lineHeight: 1.35, borderRadius: 10, border: "1px solid #ddd" }}
-                placeholder="歌詞を入力してください（改行でフレーズ、空行でセクション）"
+          <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+            <button
+              onClick={() => (isPlaying ? stop() : play())}
+              style={{
+                padding: "10px 14px",
+                borderRadius: 10,
+                border: "1px solid #222",
+                background: isPlaying ? "#222" : "#fff",
+                color: isPlaying ? "#fff" : "#222",
+                cursor: "pointer",
+                fontWeight: 600,
+              }}
+            >
+              {isPlaying ? "停止" : "再生"}
+            </button>
+
+            <button
+              onClick={() => {
+                stop();
+                // 生成は useMemo で自動更新されるので「止める」だけでOK
+              }}
+              style={{
+                padding: "10px 14px",
+                borderRadius: 10,
+                border: "1px solid #ccc",
+                background: "#fff",
+                cursor: "pointer",
+                fontWeight: 600,
+              }}
+            >
+              再生成（停止）
+            </button>
+
+            <button
+              onClick={copyABC}
+              style={{
+                padding: "10px 14px",
+                borderRadius: 10,
+                border: "1px solid #ccc",
+                background: "#fff",
+                cursor: "pointer",
+                fontWeight: 600,
+              }}
+              title="ABC記譜をクリップボードへ"
+            >
+              ABCをコピー
+            </button>
+          </div>
+
+          {error ? (
+            <div style={{ marginTop: 10, padding: 10, borderRadius: 10, background: "#fff3f3", border: "1px solid #f2b8b8", color: "#8a1f1f" }}>
+              {error}
+            </div>
+          ) : null}
+        </div>
+
+        <div style={{ border: "1px solid #ddd", borderRadius: 12, padding: 12 }}>
+          <h2 style={{ margin: 0, fontSize: 18 }}>設定</h2>
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 10 }}>
+            <label style={{ display: "grid", gap: 6, fontSize: 13 }}>
+              テンポ（BPM）
+              <input
+                type="number"
+                value={tempo}
+                onChange={(e) => setTempo(clamp(Number(e.target.value || 0), 40, 220))}
+                min={40}
+                max={220}
+                style={{ padding: 8, borderRadius: 10, border: "1px solid #ccc" }}
               />
-              <div style={{ marginTop: 8, display: "flex", gap: 8, flexWrap: "wrap" }}>
-                <button onClick={insertDemoLyrics} style={btn}>デモ歌詞</button>
-                <button onClick={() => setLyrics("")} style={btn}>クリア</button>
-                <button onClick={randomizeSeed} style={btn}>シード変更</button>
-              </div>
-              <p style={{ marginTop: 10, fontSize: 12, opacity: 0.75 }}>
-                ※ “歌うように”はブラウザ内の簡易合成（発音は疑似）です。本格的な歌声合成は外部API/モデルが必要です。
-              </p>
-            </div>
+            </label>
 
-            <div>
-              <h3 style={h3}>プロジェクト</h3>
-              <Labeled label="Project name">
-                <input value={projectName} onChange={(e)=>setProjectName(e.target.value)} style={input} />
-              </Labeled>
-              <Labeled label="Seed (再現性)">
-                <input value={seed} onChange={(e)=>setSeed(e.target.value)} style={input} />
-              </Labeled>
+            <label style={{ display: "grid", gap: 6, fontSize: 13 }}>
+              拍子
+              <select value={timeSig} onChange={(e) => setTimeSig(e.target.value)} style={{ padding: 8, borderRadius: 10, border: "1px solid #ccc" }}>
+                <option value="4/4">4/4</option>
+                <option value="3/4">3/4</option>
+              </select>
+            </label>
 
-              <h3 style={h3}>再生</h3>
-              <Row>
-                <Labeled label="Loop">
-                  <input type="checkbox" checked={loop} onChange={(e)=>setLoop(e.target.checked)} />
-                </Labeled>
-                <Labeled label="Metronome">
-                  <input type="checkbox" checked={metronome} onChange={(e)=>setMetronome(e.target.checked)} />
-                </Labeled>
-              </Row>
-              <Row>
-                <Labeled label="Count-in (bars)">
-                  <input type="number" min={0} max={4} value={countInBars} onChange={(e)=>setCountInBars(Number(e.target.value))} style={inputSmall} />
-                </Labeled>
-                <Labeled label="Volume">
-                  <input type="range" min={0} max={1} step={0.01} value={masterVol} onChange={(e)=>setMasterVol(Number(e.target.value))} />
-                </Labeled>
-              </Row>
-
-              <Labeled label="Speech overlay (擬似カラオケ)">
-                <input type="checkbox" checked={speechOverlay} onChange={(e)=>setSpeechOverlay(e.target.checked)} />
-              </Labeled>
-
-              <div style={{ marginTop: 10, fontSize: 12, opacity: 0.8 }}>
-                長さ: {formatTime(totalSec)} / 再生位置: {formatTime(playheadSec)}
-              </div>
-            </div>
-          </div>
-        </section>
-      )}
-
-      {tab === "arrange" && (
-        <section style={card}>
-          <h2 style={h2}>2) 音楽設定</h2>
-
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-            <div>
-              <h3 style={h3}>テンポ・拍子・キー</h3>
-              <Row>
-                <Labeled label="BPM">
-                  <input type="number" min={40} max={220} value={bpm} onChange={(e)=>setBpm(Number(e.target.value))} style={inputSmall} />
-                </Labeled>
-                <Labeled label="Meter">
-                  <select value={meter} onChange={(e)=>setMeter(e.target.value)} style={input}>
-                    <option value="4/4">4/4</option>
-                    <option value="3/4">3/4</option>
-                  </select>
-                </Labeled>
-              </Row>
-
-              <Row>
-                <Labeled label="Key root">
-                  <select value={keyRoot} onChange={(e)=>setKeyRoot(e.target.value)} style={input}>
-                    {["C4","D4","E4","F4","G4","A4","B4"].map(k => <option key={k} value={k}>{k}</option>)}
-                    {["C#4","D#4","F#4","G#4","A#4"].map(k => <option key={k} value={k}>{k}</option>)}
-                  </select>
-                </Labeled>
-                <Labeled label="Scale">
-                  <select value={scaleMode} onChange={(e)=>setScaleMode(e.target.value)} style={input}>
-                    <option value="major">Major</option>
-                    <option value="minor">Minor</option>
-                    <option value="pentatonic">Pentatonic</option>
-                    <option value="dorian">Dorian</option>
-                    <option value="harmonic_minor">Harmonic minor</option>
-                  </select>
-                </Labeled>
-              </Row>
-
-              <Row>
-                <Labeled label="Chord style">
-                  <select value={chordStyle} onChange={(e)=>setChordStyle(e.target.value)} style={input}>
-                    <option value="pop">Pop</option>
-                    <option value="edm">EDM</option>
-                    <option value="ballad">Ballad</option>
-                    <option value="jazzish">Jazz-ish</option>
-                    <option value="random">Random</option>
-                  </select>
-                </Labeled>
-                <Labeled label="Structure">
-                  <input value={structure} onChange={(e)=>setStructure(e.target.value)} style={input} placeholder="A A B A" />
-                </Labeled>
-              </Row>
-
-              <h3 style={h3}>複雑さ</h3>
-              <Labeled label={`Complexity: ${complexity.toFixed(2)}`}>
-                <input type="range" min={0} max={1} step={0.01} value={complexity} onChange={(e)=>setComplexity(Number(e.target.value))} />
-              </Labeled>
-              <Labeled label={`Swing: ${swing.toFixed(2)}`}>
-                <input type="range" min={0} max={0.6} step={0.01} value={swing} onChange={(e)=>setSwing(Number(e.target.value))} />
-              </Labeled>
-              <Labeled label={`Humanize: ${humanize.toFixed(2)}`}>
-                <input type="range" min={0} max={1} step={0.01} value={humanize} onChange={(e)=>setHumanize(Number(e.target.value))} />
-              </Labeled>
-
-              <Row>
-                <Labeled label="Rest prob.">
-                  <input type="number" min={0} max={0.5} step={0.01} value={restProbability} onChange={(e)=>setRestProbability(Number(e.target.value))} style={inputSmall} />
-                </Labeled>
-                <Labeled label="Accent prob.">
-                  <input type="number" min={0} max={0.8} step={0.01} value={accentProbability} onChange={(e)=>setAccentProbability(Number(e.target.value))} style={inputSmall} />
-                </Labeled>
-              </Row>
-            </div>
-
-            <div>
-              <h3 style={h3}>音域・声色</h3>
-              <Row>
-                <Labeled label="Lead octave">
-                  <input type="number" min={2} max={6} value={leadOctave} onChange={(e)=>setLeadOctave(Number(e.target.value))} style={inputSmall} />
-                </Labeled>
-                <Labeled label="Range (octaves)">
-                  <input type="number" min={1} max={4} value={rangeOctaves} onChange={(e)=>setRangeOctaves(Number(e.target.value))} style={inputSmall} />
-                </Labeled>
-              </Row>
-
-              <Labeled label="Voice preset">
-                <select value={voicePreset} onChange={(e)=>setVoicePreset(e.target.value)} style={input}>
-                  <option value="choir">Choir</option>
-                  <option value="soft">Soft</option>
-                  <option value="bright">Bright</option>
-                  <option value="robot">Robot</option>
-                </select>
-              </Labeled>
-
-              <h3 style={h3}>生成プレビュー</h3>
-              {project && (
-                <>
-                  <div style={{ fontSize: 12, opacity: 0.85, marginBottom: 6 }}>
-                    Chords: <b>{project.chordProg.join(" - ")}</b>
-                  </div>
-                  <div style={{ border: "1px solid #eee", borderRadius: 12, padding: 10, maxHeight: 260, overflow: "auto", background: "#fff" }}>
-                    {project.events.slice(0, 200).map((e, idx) => (
-                      <div key={idx} style={{ display: "grid", gridTemplateColumns: "70px 70px 1fr 90px", gap: 8, fontSize: 12, padding: "3px 0", borderBottom: "1px dashed #f2f2f2" }}>
-                        <span style={{ opacity: 0.7 }}>{e.tBeat.toFixed(2)}b</span>
-                        <span style={{ opacity: 0.7 }}>{e.durBeats.toFixed(2)}b</span>
-                        <span>{e.type === "note" ? e.lyric : "∅"}</span>
-                        <span style={{ opacity: 0.85 }}>{e.type === "note" ? midiToNoteName(e.midi) : "rest"}</span>
-                      </div>
-                    ))}
-                    {project.events.length > 200 && <div style={{ fontSize: 12, opacity: 0.6, paddingTop: 8 }}>… ({project.events.length} events)</div>}
-                  </div>
-                </>
-              )}
-            </div>
-          </div>
-        </section>
-      )}
-
-      {tab === "notation" && (
-        <section style={card}>
-          <h2 style={h2}>3) 楽譜（ABC）</h2>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 10 }}>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              <button onClick={exportAbc} style={btnPrimary}>ABCを保存</button>
-              <button onClick={() => navigator.clipboard?.writeText(abc)} style={btn}>ABCをコピー</button>
-            </div>
-
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-              <div>
-                <h3 style={h3}>ABCテキスト</h3>
-                <textarea value={abc} readOnly rows={18} style={{ width: "100%", padding: 10, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 12, borderRadius: 10, border: "1px solid #ddd" }} />
-              </div>
-              <div>
-                <h3 style={h3}>レンダリング（abcjs）</h3>
-                <div ref={abcDivRef} style={{ border: "1px solid #eee", borderRadius: 12, padding: 10, background: "#fff", minHeight: 320, overflow: "auto" }}>
-                  <div style={{ fontSize: 12, opacity: 0.7 }}>
-                    ※ レンダリングはネットワークから abcjs を動的ロードします。表示されない場合はABCテキストをご利用ください。
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </section>
-      )}
-
-      {tab === "export" && (
-        <section style={card}>
-          <h2 style={h2}>4) エクスポート</h2>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <button onClick={exportJson} style={btnPrimary}>JSON</button>
-            <button onClick={exportMidi} style={btnPrimary}>MIDI</button>
-            <button onClick={exportAbc} style={btnPrimary}>ABC</button>
-            <button onClick={exportWav} style={btn}>WAV（best-effort）</button>
-          </div>
-
-          <div style={{ marginTop: 12, fontSize: 12, opacity: 0.85, lineHeight: 1.5 }}>
-            <ul>
-              <li><b>MIDI</b>: DAW（GarageBand / Logic / Cubase 等）に読み込めます。音色は環境依存です。</li>
-              <li><b>ABC</b>: テキスト楽譜です。外部ツールでPDF化やMusicXML変換に使えます。</li>
-              <li><b>WAV</b>: ブラウザが OfflineAudioContext をサポートしていれば書き出せます。</li>
-            </ul>
-          </div>
-        </section>
-      )}
-
-      {tab === "features" && (
-        <section style={card}>
-          <h2 style={h2}>“100機能ぐらい”について</h2>
-          <div style={{ fontSize: 13, opacity: 0.9, lineHeight: 1.6 }}>
-            この App.js だけで「作曲・歌唱・楽譜・書き出し」を全部やるため、まずは<b>動くコア機能</b>を多めに実装し、残りは拡張候補として一覧にしています。
-            「どのジャンルに寄せたいか（J-POP / 演歌 / ロック / EDM 等）」「伴奏が欲しいか（ドラム/ベース/コード）」が決まると、残りを優先順位つきで実装できます。
-          </div>
-
-          <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-            <div style={{ border: "1px solid #eee", borderRadius: 12, padding: 10, background: "#fff" }}>
-              <h3 style={h3}>実装済み</h3>
-              <ul style={{ margin: 0, paddingLeft: 18 }}>
-                {featureList.filter(f=>f.done).map((f, i)=>(
-                  <li key={i} style={{ margin: "6px 0" }}>✅ {f.name}</li>
+            <label style={{ display: "grid", gap: 6, fontSize: 13 }}>
+              キー
+              <select value={key} onChange={(e) => setKey(e.target.value)} style={{ padding: 8, borderRadius: 10, border: "1px solid #ccc" }}>
+                {NOTE_NAMES_SHARP.map((n) => (
+                  <option key={n} value={n}>
+                    {n}
+                  </option>
                 ))}
-              </ul>
+              </select>
+            </label>
+
+            <label style={{ display: "grid", gap: 6, fontSize: 13 }}>
+              モード
+              <select value={mode} onChange={(e) => setMode(e.target.value)} style={{ padding: 8, borderRadius: 10, border: "1px solid #ccc" }}>
+                <option value="major">major</option>
+                <option value="minor">minor</option>
+              </select>
+            </label>
+
+            <label style={{ display: "grid", gap: 6, fontSize: 13 }}>
+              スタイル
+              <select value={style} onChange={(e) => setStyle(e.target.value)} style={{ padding: 8, borderRadius: 10, border: "1px solid #ccc" }}>
+                <option value="pop">pop</option>
+                <option value="rock">rock</option>
+                <option value="ballad">ballad</option>
+                <option value="jazz">jazz</option>
+                <option value="electro">electro</option>
+              </select>
+            </label>
+
+            <label style={{ display: "grid", gap: 6, fontSize: 13 }}>
+              複雑さ（1〜10）
+              <input
+                type="range"
+                value={complexity}
+                onChange={(e) => setComplexity(clamp(Number(e.target.value), 1, 10))}
+                min={1}
+                max={10}
+              />
+              <div style={{ display: "flex", justifyContent: "space-between", color: "#666", fontSize: 12 }}>
+                <span>シンプル</span>
+                <span>{complexity}</span>
+                <span>複雑</span>
+              </div>
+            </label>
+
+            <label style={{ display: "grid", gap: 6, fontSize: 13 }}>
+              構成
+              <select value={structure} onChange={(e) => setStructure(e.target.value)} style={{ padding: 8, borderRadius: 10, border: "1px solid #ccc" }}>
+                <option value="verse-chorus">Verse / Chorus</option>
+                <option value="through">通し（全行を1回）</option>
+              </select>
+            </label>
+          </div>
+
+          <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid #eee" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <h3 style={{ margin: 0, fontSize: 15 }}>歌うように（TTS）</h3>
+              <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
+                <input type="checkbox" checked={voiceEnabled} onChange={(e) => setVoiceEnabled(e.target.checked)} />
+                有効
+              </label>
             </div>
-            <div style={{ border: "1px solid #eee", borderRadius: 12, padding: 10, background: "#fff" }}>
-              <h3 style={h3}>追加候補（未実装）</h3>
-              <ul style={{ margin: 0, paddingLeft: 18 }}>
-                {featureList.filter(f=>!f.done).map((f, i)=>(
-                  <li key={i} style={{ margin: "6px 0" }}>🧩 {f.name}</li>
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginTop: 10 }}>
+              <label style={{ display: "grid", gap: 6, fontSize: 13 }}>
+                速さ
+                <input
+                  type="range"
+                  min={0.6}
+                  max={1.4}
+                  step={0.05}
+                  value={voiceRate}
+                  onChange={(e) => setVoiceRate(Number(e.target.value))}
+                />
+                <div style={{ fontSize: 12, color: "#666" }}>{voiceRate.toFixed(2)}</div>
+              </label>
+              <label style={{ display: "grid", gap: 6, fontSize: 13 }}>
+                ピッチ
+                <input
+                  type="range"
+                  min={0.5}
+                  max={2.0}
+                  step={0.05}
+                  value={voicePitch}
+                  onChange={(e) => setVoicePitch(Number(e.target.value))}
+                />
+                <div style={{ fontSize: 12, color: "#666" }}>{voicePitch.toFixed(2)}</div>
+              </label>
+              <label style={{ display: "grid", gap: 6, fontSize: 13 }}>
+                音量
+                <input
+                  type="range"
+                  min={0.0}
+                  max={1.0}
+                  step={0.05}
+                  value={voiceVolume}
+                  onChange={(e) => setVoiceVolume(Number(e.target.value))}
+                />
+                <div style={{ fontSize: 12, color: "#666" }}>{voiceVolume.toFixed(2)}</div>
+              </label>
+            </div>
+          </div>
+
+          <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid #eee" }}>
+            <h3 style={{ margin: 0, fontSize: 15 }}>シード（同じ歌詞でも別メロ）</h3>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8, flexWrap: "wrap" }}>
+              <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
+                <input type="checkbox" checked={autoSeed} onChange={(e) => setAutoSeed(e.target.checked)} />
+                自動（歌詞から決定）
+              </label>
+              <input
+                disabled={autoSeed}
+                value={seedText}
+                onChange={(e) => setSeedText(e.target.value)}
+                placeholder="seed"
+                style={{ padding: 8, borderRadius: 10, border: "1px solid #ccc", minWidth: 160 }}
+              />
+              <button
+                onClick={randomizeSeed}
+                style={{ padding: "8px 12px", borderRadius: 10, border: "1px solid #ccc", background: "#fff", cursor: "pointer", fontWeight: 600 }}
+              >
+                ランダム
+              </button>
+            </div>
+            <div style={{ marginTop: 6, fontSize: 12, color: "#666", lineHeight: 1.4 }}>
+              自動ON: 歌詞が同じなら毎回同じ曲になります。自動OFF + seedを変えると別バリエーションになります。
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div style={{ marginTop: 12, border: "1px solid #ddd", borderRadius: 12, padding: 12 }}>
+        <h2 style={{ margin: 0, fontSize: 18 }}>楽譜（ABC / 任意でレンダリング）</h2>
+
+        {ABCJS?.renderAbc ? (
+          <div style={{ marginTop: 10 }}>
+            <div ref={abcRef} />
+            <div style={{ marginTop: 8, fontSize: 12, color: "#666" }}>
+              abcjs が使える場合は上に譜面表示します（環境によっては表示されない場合があります）。
+            </div>
+          </div>
+        ) : (
+          <div style={{ marginTop: 10, fontSize: 12, color: "#666" }}>
+            abcjs が未導入のため、下のABC記譜テキストを譜面化ツールに貼り付けると表示できます。
+          </div>
+        )}
+
+        <pre
+          style={{
+            marginTop: 10,
+            padding: 12,
+            borderRadius: 12,
+            border: "1px solid #eee",
+            background: "#fafafa",
+            overflowX: "auto",
+            fontSize: 12,
+            lineHeight: 1.4,
+          }}
+        >
+          {generated?.abc || "（未生成）"}
+        </pre>
+      </div>
+
+      <div style={{ marginTop: 12, border: "1px solid #ddd", borderRadius: 12, padding: 12 }}>
+        <h2 style={{ margin: 0, fontSize: 18 }}>生成内容（概要）</h2>
+        {generated ? (
+          <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            <div style={{ border: "1px solid #eee", borderRadius: 12, padding: 12 }}>
+              <div style={{ fontWeight: 700, marginBottom: 8 }}>曲のパラメータ</div>
+              <div style={{ fontSize: 13, lineHeight: 1.6 }}>
+                <div>Tempo: {generated.tempo} BPM</div>
+                <div>Time: {generated.timeSig}</div>
+                <div>Key: {generated.key} {generated.mode}</div>
+                <div>Style: {generated.style}</div>
+                <div>Complexity: {generated.complexity}</div>
+                <div>Seed: {generated.seed}</div>
+                <div>Sections: {generated.sections.join(" → ")}</div>
+              </div>
+            </div>
+
+            <div style={{ border: "1px solid #eee", borderRadius: 12, padding: 12 }}>
+              <div style={{ fontWeight: 700, marginBottom: 8 }}>TTSタイムライン</div>
+              <div style={{ fontSize: 13, lineHeight: 1.6 }}>
+                {generated.lyricTimeline.slice(0, 10).map((x, i) => (
+                  <div key={i}>
+                    beat {x.tBeats.toFixed(2)}: {x.text}
+                  </div>
                 ))}
-              </ul>
-              <div style={{ marginTop: 10, fontSize: 12, opacity: 0.75 }}>
-                ここから“100個”に増やすときは、伴奏・編集UI・歌声API連携を中心に増やすのが効果的です。
+                {generated.lyricTimeline.length > 10 ? (
+                  <div style={{ color: "#666", marginTop: 6 }}>…他 {generated.lyricTimeline.length - 10} 件</div>
+                ) : null}
               </div>
             </div>
           </div>
-        </section>
-      )}
+        ) : (
+          <div style={{ marginTop: 10, color: "#666" }}>歌詞を入力すると生成されます。</div>
+        )}
+      </div>
 
-      <footer style={{ marginTop: 14, fontSize: 12, opacity: 0.7 }}>
-        Tips: 生成が気に入ったら <b>Seed</b> を固定し、BPM・Scale・Complexity を少しずつ動かすと狙った雰囲気に寄せやすいです。
-      </footer>
+      <div style={{ marginTop: 12, color: "#666", fontSize: 12, lineHeight: 1.5 }}>
+        <b>注意:</b> ブラウザの自動再生制限のため、再生ボタンを押すまでは音が鳴りません。TTSの声質や言語はOS/ブラウザ依存です。<br />
+        さらに高度な「本当の歌声合成（音素整列・ピッチ同期）」をしたい場合は、別途ボーカル合成エンジン（例: サーバー側生成、歌声合成モデル等）と連携する設計が必要です。
+      </div>
     </div>
   );
 }
 
-// ----- Small UI atoms -----
-function TabButton({ label, active, onClick }) {
-  return (
-    <button onClick={onClick} style={{
-      padding: "8px 12px",
-      borderRadius: 999,
-      border: "1px solid #ddd",
-      background: active ? "#111" : "#fff",
-      color: active ? "#fff" : "#111",
-      cursor: "pointer"
-    }}>
-      {label}
-    </button>
-  );
-}
-
-function Labeled({ label, children }) {
-  return (
-    <label style={{ display: "grid", gap: 6, marginBottom: 10 }}>
-      <div style={{ fontSize: 12, opacity: 0.75 }}>{label}</div>
-      {children}
-    </label>
-  );
-}
-
-function Row({ children }) {
-  return (
-    <div style={{ display: "flex", gap: 10, alignItems: "end", flexWrap: "wrap" }}>
-      {children}
-    </div>
-  );
-}
-
-const btn = {
-  padding: "8px 12px",
-  borderRadius: 10,
-  border: "1px solid #ddd",
-  background: "#fff",
-  cursor: "pointer"
-};
-
-const btnPrimary = {
-  ...btn,
-  background: "#111",
-  color: "#fff",
-  border: "1px solid #111"
-};
-
-const input = {
-  padding: "8px 10px",
-  borderRadius: 10,
-  border: "1px solid #ddd",
-  width: "100%",
-};
-
-const inputSmall = {
-  ...input,
-  width: 90
-};
-
-const card = {
-  marginTop: 12,
-  padding: 14,
-  border: "1px solid #eee",
-  borderRadius: 16,
-  background: "#fafafa"
-};
-
-const h2 = { margin: "0 0 10px 0", fontSize: 16 };
-const h3 = { margin: "10px 0 8px 0", fontSize: 14, opacity: 0.9 };
+export default App;
