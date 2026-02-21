@@ -29,6 +29,7 @@ import {
   signInWithEmailAndPassword,
   setPersistence,
   browserLocalPersistence,
+  sendPasswordResetEmail,
 } from "firebase/auth";
 import {
   getFirestore,
@@ -124,6 +125,7 @@ const DEFAULT_SETTINGS = {
   language: "ja",
   defaultEventDurationMin: 60,
   defaultTaskEstimateMin: 30,
+  adminEmails: [],
 };
 
 // -------------------- Feature catalog (≈100) --------------------
@@ -448,15 +450,39 @@ function Toast({ toast, onClose }) {
 }
 
 
-function AuthScreen({ onLogin, onSignup }) {
-  const [mode, setMode] = React.useState("login"); // login | signup
+function AuthScreen({ onLogin, onSignup, onReset }) {
+  const [mode, setMode] = React.useState("login"); // login | signup | reset
+  const [identifier, setIdentifier] = React.useState(""); // ID or Email
   const [email, setEmail] = React.useState("");
+  const [loginId, setLoginId] = React.useState("");
   const [password, setPassword] = React.useState("");
   const [err, setErr] = React.useState("");
+  const [info, setInfo] = React.useState("");
 
   async function submit() {
     setErr("");
+    setInfo("");
     try {
+      if (mode === "reset") {
+        if (!identifier) {
+          setErr("ID（またはメール）を入力してください。");
+          return;
+        }
+        await onReset(identifier);
+        setInfo("パスワード再設定メールを送信しました。メールをご確認ください。");
+        return;
+      }
+
+      if (mode === "login") {
+        if (!identifier || !password) {
+          setErr("ID（またはメール）とパスワードを入力してください。");
+          return;
+        }
+        await onLogin(identifier, password);
+        return;
+      }
+
+      // signup
       if (!email || !password) {
         setErr("メールアドレスとパスワードを入力してください。");
         return;
@@ -465,15 +491,14 @@ function AuthScreen({ onLogin, onSignup }) {
         setErr("パスワードは6文字以上にしてください。");
         return;
       }
-      if (mode === "login") await onLogin(email, password);
-      else await onSignup(email, password);
+      await onSignup(email, password, loginId || null);
+      setInfo("登録が完了しました。ログイン済みです。");
     } catch (e) {
       const msg = String(e?.message || e);
-      // Firebase error hints (Japanese)
       if (msg.includes("auth/invalid-credential") || msg.includes("auth/wrong-password")) {
-        setErr("メールアドレスまたはパスワードが違います。");
+        setErr("ID/メールまたはパスワードが違います。");
       } else if (msg.includes("auth/user-not-found")) {
-        setErr("ユーザーが見つかりません。サインアップしてください。");
+        setErr("ユーザーが見つかりません。新規登録してください。");
       } else if (msg.includes("auth/email-already-in-use")) {
         setErr("このメールアドレスは既に使われています。ログインしてください。");
       } else if (msg.includes("auth/invalid-email")) {
@@ -488,43 +513,88 @@ function AuthScreen({ onLogin, onSignup }) {
     <div className="auth-screen">
       <div className="auth-card">
         <div className="auth-title">Super Planner</div>
-        <div className="auth-sub">ID（メール）とパスワードでログインできます（Firebase Auth）。</div>
+        <div className="auth-sub">ID（任意文字列）またはメール + パスワードでログインできます。</div>
 
         <div className="auth-form">
-          <input
-            type="email"
-            placeholder="メールアドレス（ID）"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            autoComplete="email"
-          />
-          <input
-            type="password"
-            placeholder="パスワード"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            autoComplete={mode === "login" ? "current-password" : "new-password"}
-          />
+          {mode === "login" ? (
+            <>
+              <input
+                type="text"
+                placeholder="ID（社員番号など）またはメール"
+                value={identifier}
+                onChange={(e) => setIdentifier(e.target.value)}
+                autoComplete="username"
+              />
+              <input
+                type="password"
+                placeholder="パスワード"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                autoComplete="current-password"
+              />
+            </>
+          ) : mode === "signup" ? (
+            <>
+              <input
+                type="email"
+                placeholder="メールアドレス（ログインにも利用できます）"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                autoComplete="email"
+              />
+              <input
+                type="text"
+                placeholder="ID（任意・社員番号など）※後から登録も可"
+                value={loginId}
+                onChange={(e) => setLoginId(e.target.value)}
+                autoComplete="username"
+              />
+              <input
+                type="password"
+                placeholder="パスワード（6文字以上）"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                autoComplete="new-password"
+              />
+            </>
+          ) : (
+            <>
+              <input
+                type="text"
+                placeholder="ID（またはメール）"
+                value={identifier}
+                onChange={(e) => setIdentifier(e.target.value)}
+                autoComplete="username"
+              />
+              <div className="small">
+                入力したIDが社員番号などの場合は、管理者が登録したID→メール紐付けから解決します。
+              </div>
+            </>
+          )}
+
           {err ? <div className="auth-error">{err}</div> : null}
+          {info ? <div className="auth-info">{info}</div> : null}
 
           <button className="btn primary full" onClick={submit}>
-            {mode === "login" ? "ログイン" : "新規登録"}
+            {mode === "login" ? "ログイン" : mode === "signup" ? "新規登録" : "再設定メール送信"}
           </button>
 
-          <button
-            className="btn ghost full"
-            onClick={() => {
-              setErr("");
-              setMode((m) => (m === "login" ? "signup" : "login"));
-            }}
-          >
-            {mode === "login" ? "新規登録はこちら" : "ログインはこちら"}
-          </button>
+          <div className="auth-links">
+            <button className="btn ghost full" onClick={() => { setErr(""); setInfo(""); setMode("login"); }}>
+              ログイン
+            </button>
+            <button className="btn ghost full" onClick={() => { setErr(""); setInfo(""); setMode("signup"); }}>
+              新規登録
+            </button>
+            <button className="btn ghost full" onClick={() => { setErr(""); setInfo(""); setMode("reset"); }}>
+              パスワードを忘れた
+            </button>
+          </div>
 
           <div className="auth-foot">
-            ※Firebase Console → Authentication → Sign-in method で「メール/パスワード」を有効化してください。
+            Firebase Console → Authentication → Sign-in method で「メール/パスワード」を有効化してください。
             <br />
-            ※ログイン状態はブラウザに保存され、次回も自動で復帰します。
+            ログイン状態はブラウザに保存され、次回も自動で復帰します（永続化）。
           </div>
         </div>
       </div>
@@ -532,7 +602,8 @@ function AuthScreen({ onLogin, onSignup }) {
   );
 }
 
-// -------------------- Main App --------------------
+ // -------------------- Main App --------------------
+
 export default function App() {
   const [user, setUser] = useState(null);
 
@@ -688,14 +759,64 @@ export default function App() {
   }, [settings, user]);
 
   // -------------------- Actions --------------------
-  async function loginWithEmail(email, password) {
+
+  // --- ID(任意文字列) → Email 解決（Firestoreの publicIdMap を参照）
+  // 仕様:
+  // - 入力が email 形式( "@" を含む )なら、そのまま email として扱う
+  // - それ以外は publicIdMap/{loginId} ドキュメントから email を取得してログインする
+  //
+  // ⚠️ 注意:
+  // ログイン前に参照するため、publicIdMap の read を許可するルールが必要です。
+  // メール漏えいを避けたい場合は、Cloudflare Worker などサーバ側で解決する方式にしてください。
+  async function resolveLoginIdentifier(identifier) {
+    const id = (identifier || "").trim();
+    if (!id) throw new Error("IDを入力してください");
+    if (id.includes("@")) return id; // email
+
+    const ref = doc(db, "publicIdMap", id);
+    const snap = await getDoc(ref);
+    if (!snap.exists()) throw new Error("IDが見つかりませんでした（管理者に確認してください）");
+    const data = snap.data();
+    if (!data?.email) throw new Error("IDの登録が不完全です（emailがありません）");
+    return data.email;
+  }
+
+  async function registerLoginIdForCurrentUser(loginId) {
+    const id = (loginId || "").trim();
+    if (!id) return;
+    if (!user?.email) throw new Error("ユーザー情報がありません");
+    // 既存がある場合は上書きしない（衝突防止）
+    const ref = doc(db, "publicIdMap", id);
+    const snap = await getDoc(ref);
+    if (snap.exists()) {
+      const existing = snap.data();
+      if (existing?.uid && existing.uid !== user.uid) {
+        throw new Error("そのIDは既に他のユーザーに使用されています");
+      }
+    }
+    await setDoc(ref, { email: user.email, uid: user.uid, updatedAt: serverTimestamp() }, { merge: true });
+  }
+
+  async function resetPasswordByIdentifier(identifier) {
+    const email = await resolveLoginIdentifier(identifier);
+    await setPersistence(auth, browserLocalPersistence);
+    await sendPasswordResetEmail(auth, email);
+  }
+
+  async function loginWithEmail(identifier, password) {
     await setPersistence(auth, browserLocalPersistence); // keep login state (永続化)
+    const email = await resolveLoginIdentifier(identifier);
     await signInWithEmailAndPassword(auth, email, password);
   }
 
-  async function signUpWithEmail(email, password) {
+  async function signUpWithEmail(email, password, loginIdOpt) {
     await setPersistence(auth, browserLocalPersistence);
     await createUserWithEmailAndPassword(auth, email, password);
+    if (loginIdOpt) {
+      setTimeout(() => {
+        registerLoginIdForCurrentUser(loginIdOpt).catch((e) => console.warn(e));
+      }, 0);
+    }
   }
   async function logout() {
     await signOut(auth);
@@ -1053,7 +1174,7 @@ export default function App() {
     return (
       <div className="app-root">
         <GlobalStyles theme={settings.theme} density={settings.density} />
-        <AuthScreen onLogin={loginWithEmail} onSignup={signUpWithEmail} />
+        <AuthScreen onLogin={loginWithEmail} onSignup={signUpWithEmail} onReset={resetPasswordByIdentifier} />
       </div>
     );
   }
@@ -1158,6 +1279,13 @@ export default function App() {
             <button className={`side-item ${panel === "features" ? "active" : ""}`} onClick={() => setPanel("features")}>
               <Icon name="spark" /> 機能一覧
             </button>
+
+            {settings.adminEmails?.includes(user.email) ? (
+              <button className={`side-item ${panel === "admin" ? "active" : ""}`} onClick={() => setPanel("admin")}>
+                🛠️ 管理
+              </button>
+            ) : null}
+
           </div>
 
           <div className="side-section">
@@ -1305,6 +1433,13 @@ export default function App() {
             />
           ) : panel === "analytics" ? (
             <AnalyticsPanel analytics={analytics} allTags={allTags} />
+          ) : panel === "admin" ? (
+            <AdminPanel
+              currentUser={user}
+              settings={settings}
+              setSettings={setSettings}
+              onRegisterId={(id) => registerLoginIdForCurrentUser(id)}
+            />
           ) : (
             <FeaturesPanel />
           )}
@@ -1868,6 +2003,107 @@ function AnalyticsPanel({ analytics, allTags }) {
         ))}
         {!allTags.length ? <div className="empty">タグがありません</div> : null}
       </div>
+    </div>
+  );
+}
+
+
+function AdminPanel({ currentUser, settings, setSettings, onRegisterId }) {
+  const [newAdminEmail, setNewAdminEmail] = React.useState("");
+  const [idToRegister, setIdToRegister] = React.useState("");
+  const [msg, setMsg] = React.useState("");
+
+  return (
+    <div className="panel">
+      <div className="panel-head">
+        <div className="panel-title">🛠️ 管理</div>
+      </div>
+
+      <div className="tip small">
+        ここでは「管理者メール（ホワイトリスト）」と「ID→メール紐付け」の運用を支援します。<br/>
+        ※本格的なユーザー発行（他人のアカウント作成）は Firebase Admin / Functions が必要です。
+      </div>
+
+      <div className="section-title">管理者メール（settings.adminEmails）</div>
+      <div className="list dense">
+        {(settings.adminEmails || []).map((em) => (
+          <div key={em} className="list-item">
+            <div className="li-main">
+              <div className="li-title">{em}</div>
+              <div className="li-sub">管理画面を表示できるユーザー</div>
+            </div>
+            <button
+              className="btn ghost"
+              onClick={() => {
+                const next = (settings.adminEmails || []).filter((x) => x !== em);
+                setSettings((s) => ({ ...s, adminEmails: next }));
+                setMsg("管理者を削除しました");
+              }}
+            >
+              削除
+            </button>
+          </div>
+        ))}
+        {!settings.adminEmails?.length ? <div className="empty">まだ登録がありません</div> : null}
+      </div>
+
+      <div className="row">
+        <input
+          value={newAdminEmail}
+          onChange={(e) => setNewAdminEmail(e.target.value)}
+          placeholder="追加する管理者メール"
+        />
+        <button
+          className="btn primary"
+          onClick={() => {
+            const em = newAdminEmail.trim();
+            if (!em) return;
+            const next = Array.from(new Set([...(settings.adminEmails || []), em]));
+            setSettings((s) => ({ ...s, adminEmails: next }));
+            setNewAdminEmail("");
+            setMsg("管理者を追加しました（設定は自動保存）");
+          }}
+        >
+          追加
+        </button>
+      </div>
+
+      <div className="section-title">ID → メール紐付け（publicIdMap）</div>
+      <div className="small">
+        ユーザーはログイン画面で「ID」を入力すると、publicIdMap からメールを解決してログインできます。
+      </div>
+
+      <div className="row">
+        <input
+          value={idToRegister}
+          onChange={(e) => setIdToRegister(e.target.value)}
+          placeholder="登録するID（社員番号など）"
+        />
+        <button
+          className="btn primary"
+          onClick={async () => {
+            setMsg("");
+            try {
+              await onRegisterId(idToRegister);
+              setMsg("IDを現在のユーザーのメールに紐付けました");
+              setIdToRegister("");
+            } catch (e) {
+              setMsg(String(e?.message || e));
+            }
+          }}
+        >
+          現在のユーザーに紐付け
+        </button>
+      </div>
+
+      <div className="tip small">
+        ✅ 運用例（推奨）<br/>
+        1) ユーザーは「新規登録」でメール+パスワードを作る<br/>
+        2) 管理者がこの画面で「社員番号(ID) → そのユーザーのメール」を登録<br/>
+        3) 以後、ユーザーは社員番号(ID)でもログイン可能
+      </div>
+
+      {msg ? <div className="small" style={{ color: "var(--muted)" }}>{msg}</div> : null}
     </div>
   );
 }
@@ -2542,6 +2778,8 @@ function GlobalStyles({ theme, density }) {
       .auth-foot{ color: var(--muted); margin-top: 14px; font-size: 12px; }
 .auth-form{ display:flex; flex-direction:column; gap:10px; margin-top: 10px; }
 .auth-error{ color: var(--red); font-size: 12px; text-align:left; padding: 6px 4px; }
+.auth-info{ color: var(--green); font-size: 12px; text-align:left; padding: 6px 4px; }
+.auth-links{ display:flex; flex-direction:column; gap:8px; }
 
       /* print */
       @media print{
