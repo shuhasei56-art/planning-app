@@ -727,12 +727,13 @@ export default function App() {
 
   const [complexity, setComplexity] = useLocalStorageState("lyricSong.complexity", 0.55);
   const [swing, setSwing] = useLocalStorageState("lyricSong.swing", 0.15);
-  const \[humanize, setHumanize\] = useLocalStorageState\("lyricSong\.humanize", 0\.35\);\n
-const [portamento, setPortamento] = useLocalStorageState("lyricSong.portamento", 0.06); // sec
-const [breathAmount, setBreathAmount] = useLocalStorageState("lyricSong.breathAmount", 0.22);
-const [vibratoDepth, setVibratoDepth] = useLocalStorageState("lyricSong.vibratoDepth", 10); // cents-ish
-const [vibratoHz, setVibratoHz] = useLocalStorageState("lyricSong.vibratoHz", 5.4);
-const [consonantAmount, setConsonantAmount] = useLocalStorageState("lyricSong.consonantAmount", 0.25);
+  const [humanize, setHumanize] = useLocalStorageState("lyricSong.humanize", 0.35);
+
+  const [portamento, setPortamento] = useLocalStorageState("lyricSong.portamento", 0.06); // sec
+  const [breathAmount, setBreathAmount] = useLocalStorageState("lyricSong.breathAmount", 0.22);
+  const [vibratoDepth, setVibratoDepth] = useLocalStorageState("lyricSong.vibratoDepth", 10); // cents-ish
+  const [vibratoHz, setVibratoHz] = useLocalStorageState("lyricSong.vibratoHz", 5.4);
+  const [consonantAmount, setConsonantAmount] = useLocalStorageState("lyricSong.consonantAmount", 0.25);
 
   const [structure, setStructure] = useLocalStorageState("lyricSong.structure", "A A B A");
   const [rangeOctaves, setRangeOctaves] = useLocalStorageState("lyricSong.rangeOctaves", 2);
