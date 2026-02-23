@@ -4,7 +4,8 @@
   "description": "Fast streaming AI chat application",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy"
+    "deploy": "wrangler deploy",
+    "build": "echo 'No build step required'" 
   },
   "devDependencies": {
     "wrangler": "^3.0.0"
