@@ -1,8 +1,4 @@
-// Simple API client. Worker serves /api/* endpoints.
-//
-// IMPORTANT:
-// Some build environments may treat modules as CJS and disallow named exports.
-// To avoid that, this file uses a DEFAULT EXPORT ONLY.
+// API client + simple local auth (DEFAULT EXPORT ONLY)
 
 async function api(path, { method = "GET", body, token } = {}) {
   const headers = { "Content-Type": "application/json" };
@@ -22,8 +18,7 @@ async function api(path, { method = "GET", body, token } = {}) {
   return data;
 }
 
-// Local "auth": create or reuse a user id stored in localStorage.
-// Replace with real auth later.
+// Local demo "auth" (token stored in localStorage)
 function getLocalUser() {
   const raw = localStorage.getItem("sp_user");
   if (!raw) return null;
@@ -36,4 +31,5 @@ function clearLocalUser() {
   localStorage.removeItem("sp_user");
 }
 
-export default { api, getLocalUser, setLocalUser, clearLocalUser };
+const apiModule = { api, getLocalUser, setLocalUser, clearLocalUser };
+export default apiModule;
