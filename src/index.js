@@ -1,7 +1,5 @@
-import React from 'react';
-import { createRoot } from 'react-dom/client';
-import App from './App';
-import './styles.css';
+import { App } from './App.js';
 
-const root = createRoot(document.getElementById('root'));
-root.render(<App />);
+document.addEventListener('DOMContentLoaded', () => {
+    new App();
+});
