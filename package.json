@@ -1,25 +1,20 @@
 {
   "name": "super-planner",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "private": true,
-  "description": "Googleカレンダー風 UI + タスク + AI相談（Firebase同期）",
-  "dependencies": {
-    "firebase": "^10.12.4",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "react-scripts": "5.0.1"
-  },
+  "description": "Webで本(ページ)を書いて公開し、アプリ内コインで購入できるサンプル（Cloudflare Workers + D1 + R2 + React）。",
   "scripts": {
     "start": "react-scripts start",
-    "build": "CI=false react-scripts build",
+    "build": "react-scripts build",
     "test": "react-scripts test",
-    "eject": "react-scripts eject"
+    "eject": "react-scripts eject",
+    "dev:worker": "npm run build && wrangler dev",
+    "deploy": "npm run build && wrangler deploy"
   },
-  "eslintConfig": {
-    "extends": [
-      "react-app",
-      "react-app/jest"
-    ]
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-scripts": "5.0.1"
   },
   "browserslist": {
     "production": [
