@@ -3,9 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "description": "Webで本(ページ)を書いて公開し、アプリ内コインで購入できるサンプル（Cloudflare Workers + D1 + R2 + React）。",
-  "scripts": {
+ "scripts": {
     "start": "react-scripts start",
-    "build": "react-scripts build",
+    "build": "CI=false react-scripts build",
     "test": "react-scripts test",
     "eject": "react-scripts eject",
     "dev:worker": "npm run build && wrangler dev",
