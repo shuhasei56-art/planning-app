@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import apiMod from "./api";
 import mdMod from "./markdown";
+
 const { api, clearLocalUser, getLocalUser, setLocalUser } = apiMod;
 const { excerpt, renderMarkdown } = mdMod;
 
@@ -73,10 +74,9 @@ function Login({ onLoggedIn }) {
     setBusy(true);
     try {
       const display_name = (name || "").trim() || "ユーザー";
-      // Create user + initial 1000 coins
       const data = await api("/api/users", { method: "POST", body: { display_name } });
       setLocalUser({ user_id: data.user_id, token: data.token, display_name: data.display_name });
-      onLoggedIn();
+      await onLoggedIn();
       navigate("/");
     } catch (e) {
       setErr(e.message);
@@ -88,47 +88,46 @@ function Login({ onLoggedIn }) {
   return (
     <div className="card">
       <h2>ログイン（デモ）</h2>
-      <p>このサンプルは簡易ログインです。後でGoogleログイン等に置き換えできます。</p>
+      <p>登録時に初期1000コインが付与されます（実際のお金は扱いません）。</p>
       <label>表示名</label>
       <input value={name} onChange={(e) => setName(e.target.value)} placeholder="例）まさえ" />
       {err && <div className="notice" style={{borderColor:"rgba(239,68,68,.4)", color:"#fecaca"}}>{err}</div>}
       <div className="row" style={{marginTop:12}}>
-        <button className="primary" disabled={busy} onClick={submit}>はじめる（初期1000コイン）</button>
-        <span className="small">EnterキーでもOK</span>
+        <button className="primary" disabled={busy} onClick={submit}>はじめる</button>
       </div>
     </div>
   );
 }
 
-function Dashboard({ me, token }) {
+function Dashboard({ token }) {
   const [mine, setMine] = useState([]);
   const [publics, setPublics] = useState([]);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(true);
 
-  async function load() {
-    setBusy(true);
-    setErr("");
-    try {
-      const d = await api("/api/pages/mine", { token });
-      setMine(d.pages || []);
-      const p = await api("/api/pages/public");
-      setPublics(p.pages || []);
-    } catch (e) {
-      setErr(e.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    (async () => {
+      setBusy(true);
+      setErr("");
+      try {
+        const d = await api("/api/pages/mine", { token });
+        setMine(d.pages || []);
+        const p = await api("/api/pages/public");
+        setPublics(p.pages || []);
+      } catch (e) {
+        setErr(e.message);
+      } finally {
+        setBusy(false);
+      }
+    })();
+  }, [token]);
 
   return (
     <div className="grid">
       <div className="col-12">
         <div className="card">
           <h2>ダッシュボード</h2>
-          <p>あなたの下書き/公開作品と、全体の公開作品を表示します。</p>
+          <p>あなたの作品と、みんなの公開作品。</p>
           {err && <div className="notice" style={{borderColor:"rgba(239,68,68,.4)", color:"#fecaca"}}>{err}</div>}
           {busy ? <p>読み込み中…</p> : null}
         </div>
@@ -147,11 +146,10 @@ function Dashboard({ me, token }) {
               <div className="row" style={{justifyContent:"space-between"}}>
                 <div>
                   <div style={{fontWeight:700}}>{pg.title}</div>
-                  <div className="small">{pg.status === "published" ? (
-                    <span className="badge pub">公開</span>
-                  ) : (
-                    <span className="badge draft">下書き</span>
-                  )}　価格: {pg.price_coins} コイン</div>
+                  <div className="small">
+                    {pg.status === "published" ? <span className="badge pub">公開</span> : <span className="badge draft">下書き</span>}
+                    {" "}価格: {pg.price_coins} コイン
+                  </div>
                 </div>
                 <div className="row">
                   <button onClick={() => navigate(`/edit/${pg.id}`)}>編集</button>
@@ -171,7 +169,7 @@ function Dashboard({ me, token }) {
       <div className="col-6">
         <div className="card">
           <h2>公開作品（みんな）</h2>
-          <p className="small">購入が必要な作品は、購入すると全文が読めます。</p>
+          <p className="small">有料は購入後に全文表示。</p>
           <div className="hr" />
           {!publics.length ? <p>公開作品がまだありません。</p> : null}
           {publics.map(pg => (
@@ -181,9 +179,7 @@ function Dashboard({ me, token }) {
                   <div style={{fontWeight:700}}>{pg.title}</div>
                   <div className="small">作者: {pg.author_name}　価格: {pg.price_coins} コイン</div>
                 </div>
-                <div className="row">
-                  <button className="good" onClick={() => navigate(`/p/${pg.slug}`)}>読む</button>
-                </div>
+                <button className="good" onClick={() => navigate(`/p/${pg.slug}`)}>読む</button>
               </div>
               <p style={{marginTop:8}}>{excerpt(pg.content, 220)}</p>
               {pg.cover_image_url ? <img className="thumb" src={pg.cover_image_url} alt="" /> : null}
@@ -195,7 +191,7 @@ function Dashboard({ me, token }) {
   );
 }
 
-function Editor({ me, token, pageId }) {
+function Editor({ token, pageId }) {
   const isNew = !pageId;
   const [page, setPage] = useState({ title:"", slug:"", content:"", cover_image_url:"", price_coins: 0, status:"draft" });
   const [err, setErr] = useState("");
@@ -212,7 +208,7 @@ function Editor({ me, token, pageId }) {
         setErr(e.message);
       }
     })();
-  }, [pageId]);
+  }, [isNew, pageId, token]);
 
   const previewHtml = useMemo(() => renderMarkdown(page.content), [page.content]);
 
@@ -235,7 +231,7 @@ function Editor({ me, token, pageId }) {
       setErr(e.message);
     } finally {
       setBusy(false);
-      setTimeout(() => setSavedMsg(""), 2500);
+      setTimeout(() => setSavedMsg(""), 1500);
     }
   }
 
@@ -251,7 +247,7 @@ function Editor({ me, token, pageId }) {
       setErr(e.message);
     } finally {
       setBusy(false);
-      setTimeout(() => setSavedMsg(""), 2500);
+      setTimeout(() => setSavedMsg(""), 1500);
     }
   }
 
@@ -262,7 +258,6 @@ function Editor({ me, token, pageId }) {
     try {
       const form = new FormData();
       form.append("file", file);
-      form.append("as_cover", asCover ? "1" : "0");
       const res = await fetch("/api/upload", {
         method: "POST",
         headers: token ? { "Authorization": `Bearer ${token}` } : undefined,
@@ -271,102 +266,92 @@ function Editor({ me, token, pageId }) {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
       const url = data.url;
-      if (asCover) {
-        setPage(p => ({ ...p, cover_image_url: url }));
-      } else {
-        // Insert markdown image at end (simple). You can make this "insert at cursor" later.
-        setPage(p => ({ ...p, content: (p.content || "") + `\n\n![](${url})\n` }));
-      }
+      if (asCover) setPage(p => ({ ...p, cover_image_url: url }));
+      else setPage(p => ({ ...p, content: (p.content || "") + `\n\n![](${url})\n` }));
       setSavedMsg("画像を追加しました。");
     } catch (e) {
       setErr(e.message);
     } finally {
       setBusy(false);
-      setTimeout(() => setSavedMsg(""), 2500);
+      setTimeout(() => setSavedMsg(""), 1500);
     }
   }
 
   return (
-    <div className="grid">
-      <div className="col-12">
-        <div className="card">
-          <div className="row" style={{justifyContent:"space-between"}}>
-            <div>
-              <h2>{isNew ? "新規作成" : "編集"}</h2>
-              <p className="small">保存: <span className="kbd">Ctrl</span> + <span className="kbd">S</span></p>
-            </div>
-            <div className="row">
-              <button onClick={() => navigate("/")} >戻る</button>
-              <button className="primary" disabled={busy} onClick={save}>保存</button>
-              {!isNew ? (
-                <button className="good" disabled={busy || page.status === "published"} onClick={publish}>
-                  {page.status === "published" ? "公開済み" : "公開"}
-                </button>
-              ) : null}
-            </div>
-          </div>
-          {err && <div className="notice" style={{borderColor:"rgba(239,68,68,.4)", color:"#fecaca"}}>{err}</div>}
-          {savedMsg && <div className="notice" style={{borderColor:"rgba(34,197,94,.4)", color:"#bbf7d0"}}>{savedMsg}</div>}
-          <div className="grid" style={{marginTop:8}}>
-            <div className="col-6">
-              <label>タイトル</label>
-              <input value={page.title} onChange={(e) => setPage(p => ({...p, title:e.target.value}))} />
-            </div>
-            <div className="col-6">
-              <label>スラッグ（URLの末尾）</label>
-              <input value={page.slug} onChange={(e) => setPage(p => ({...p, slug:e.target.value}))} placeholder="空ならタイトルから自動生成" />
-              <div className="small">公開URL: <span className="kbd">#/p/{page.slug || slugify(page.title)}</span></div>
-            </div>
-            <div className="col-6">
-              <label>価格（コイン）</label>
-              <input type="number" min="0" value={page.price_coins} onChange={(e) => setPage(p => ({...p, price_coins: Number(e.target.value || 0)}))} />
-              <div className="small">0なら無料</div>
-            </div>
-            <div className="col-6">
-              <label>表紙画像</label>
-              <div className="row">
-                <input type="file" accept="image/*" onChange={(e) => uploadImage(e.target.files?.[0], true)} />
-              </div>
-              {page.cover_image_url ? <img className="thumb" src={page.cover_image_url} alt="" style={{marginTop:8}}/> : <div className="small">未設定</div>}
-            </div>
-            <div className="col-6">
-              <label>本文（Markdown）</label>
-              <textarea value={page.content} onChange={(e) => setPage(p => ({...p, content:e.target.value}))} />
-              <div className="row">
-                <input type="file" accept="image/*" onChange={(e) => uploadImage(e.target.files?.[0], false)} />
-                <span className="small">画像は本文末尾に挿入されます（後で改善可）</span>
-              </div>
-            </div>
-            <div className="col-6">
-              <label>プレビュー</label>
-              <div className="card markdown" dangerouslySetInnerHTML={{ __html: previewHtml }} />
-            </div>
-          </div>
+    <div className="card">
+      <div className="row" style={{justifyContent:"space-between"}}>
+        <div>
+          <h2>{isNew ? "新規作成" : "編集"}</h2>
+          <p className="small">画像は本文末尾に挿入されます（後でカーソル挿入に改善可）。</p>
+        </div>
+        <div className="row">
+          <button onClick={() => navigate("/")}>戻る</button>
+          <button className="primary" disabled={busy} onClick={save}>保存</button>
+          {!isNew ? (
+            <button className="good" disabled={busy || page.status === "published"} onClick={publish}>
+              {page.status === "published" ? "公開済み" : "公開"}
+            </button>
+          ) : null}
+        </div>
+      </div>
+
+      {err && <div className="notice" style={{borderColor:"rgba(239,68,68,.4)", color:"#fecaca"}}>{err}</div>}
+      {savedMsg && <div className="notice" style={{borderColor:"rgba(34,197,94,.4)", color:"#bbf7d0"}}>{savedMsg}</div>}
+
+      <div className="grid" style={{marginTop:8}}>
+        <div className="col-6">
+          <label>タイトル</label>
+          <input value={page.title} onChange={(e) => setPage(p => ({...p, title:e.target.value}))} />
+        </div>
+        <div className="col-6">
+          <label>スラッグ（URL末尾）</label>
+          <input value={page.slug} onChange={(e) => setPage(p => ({...p, slug:e.target.value}))} placeholder="空なら自動生成" />
+          <div className="small">URL: <span className="kbd">#/p/{page.slug || slugify(page.title)}</span></div>
+        </div>
+        <div className="col-6">
+          <label>価格（コイン）</label>
+          <input type="number" min="0" value={page.price_coins} onChange={(e) => setPage(p => ({...p, price_coins: Number(e.target.value || 0)}))} />
+          <div className="small">0なら無料</div>
+        </div>
+        <div className="col-6">
+          <label>表紙画像</label>
+          <input type="file" accept="image/*" onChange={(e) => uploadImage(e.target.files?.[0], true)} />
+          {page.cover_image_url ? <img className="thumb" src={page.cover_image_url} alt="" style={{marginTop:8}}/> : <div className="small">未設定</div>}
+        </div>
+        <div className="col-6">
+          <label>本文（Markdown）</label>
+          <textarea value={page.content} onChange={(e) => setPage(p => ({...p, content:e.target.value}))} />
+          <input type="file" accept="image/*" onChange={(e) => uploadImage(e.target.files?.[0], false)} />
+        </div>
+        <div className="col-6">
+          <label>プレビュー</label>
+          <div className="card markdown" dangerouslySetInnerHTML={{ __html: previewHtml }} />
         </div>
       </div>
     </div>
   );
 }
 
-function PublicPage({ me, token, slug }) {
+function PublicPage({ token, slug }) {
   const [data, setData] = useState(null);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(true);
   const [buyBusy, setBuyBusy] = useState(false);
 
-  async function load() {
-    setBusy(true);
-    setErr("");
-    try {
-      const d = await api(`/api/p/${encodeURIComponent(slug)}`, { token });
-      setData(d);
-    } catch (e) {
-      setErr(e.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-  useEffect(() => { load(); }, [slug]);
+  useEffect(() => {
+    (async () => {
+      setBusy(true);
+      setErr("");
+      try {
+        const d = await api(`/api/p/${encodeURIComponent(slug)}`, { token });
+        setData(d);
+      } catch (e) {
+        setErr(e.message);
+      } finally {
+        setBusy(false);
+      }
+    })();
+  }, [slug, token]);
 
   async function purchase() {
     if (!token) { navigate("/login"); return; }
@@ -374,7 +359,9 @@ function PublicPage({ me, token, slug }) {
     setErr("");
     try {
       await api("/api/purchase", { method:"POST", token, body: { page_id: data.page.id } });
-      await load();
+      // reload
+      const d = await api(`/api/p/${encodeURIComponent(slug)}`, { token });
+      setData(d);
     } catch (e) {
       setErr(e.message);
     } finally {
@@ -399,14 +386,11 @@ function PublicPage({ me, token, slug }) {
           <div className="row">
             <span className="pill">作者: {page.author_name}</span>
             <span className="pill">価格: {page.price_coins} コイン</span>
-            {page.price_coins > 0 ? (
-              <span className="pill">{viewer?.purchased ? "購入済み" : "未購入"}</span>
-            ) : <span className="pill">無料</span>}
+            {page.price_coins > 0 ? <span className="pill">{viewer?.purchased ? "購入済み" : "未購入"}</span> : <span className="pill">無料</span>}
           </div>
         </div>
         <div className="row">
           <button onClick={() => navigate("/")}>一覧へ</button>
-          {isOwner ? <button onClick={() => navigate(`/edit/${page.id}`)}>編集</button> : null}
         </div>
       </div>
 
@@ -444,24 +428,12 @@ export default function App() {
       const d = await api("/api/me", { token: u.token });
       setMe(d.me);
     } catch (e) {
-      // token invalid etc
       setMe(null);
       setErr(e.message);
     }
   }
 
   useEffect(() => { refreshMe(); }, []);
-
-  useEffect(() => {
-    const onKey = (e) => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
-        e.preventDefault();
-        // Let Editor handle via buttons; this is just preventing browser save dialog.
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
 
   const u = getLocalUser();
   const token = u?.token;
@@ -476,15 +448,15 @@ export default function App() {
   if (route === "/login") {
     content = <Login onLoggedIn={refreshMe} />;
   } else if (route === "/new") {
-    content = me ? <Editor me={me} token={token} /> : <Login onLoggedIn={refreshMe} />;
+    content = token ? <Editor token={token} /> : <Login onLoggedIn={refreshMe} />;
   } else if (route.startsWith("/edit/")) {
     const id = route.split("/")[2];
-    content = me ? <Editor me={me} token={token} pageId={id} /> : <Login onLoggedIn={refreshMe} />;
+    content = token ? <Editor token={token} pageId={id} /> : <Login onLoggedIn={refreshMe} />;
   } else if (route.startsWith("/p/")) {
     const slug = route.split("/")[2] || "";
-    content = <PublicPage me={me} token={token} slug={slug} />;
+    content = <PublicPage token={token} slug={slug} />;
   } else {
-    content = me ? <Dashboard me={me} token={token} /> : <Login onLoggedIn={refreshMe} />;
+    content = token ? <Dashboard token={token} /> : <Login onLoggedIn={refreshMe} />;
   }
 
   return (
@@ -496,7 +468,7 @@ export default function App() {
       <div style={{height:30}} />
       <div className="small">
         <div className="hr" />
-        <div>デモ仕様: ログインは簡易（ローカル保存）。コインはアプリ内のみで、実際のお金は扱いません。</div>
+        <div>デモ仕様: コインはアプリ内のみ（実際のお金は扱いません）。</div>
       </div>
     </div>
   );
