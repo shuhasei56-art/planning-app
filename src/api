@@ -1,5 +1,10 @@
 // Simple API client. Worker serves /api/* endpoints.
-export async function api(path, { method = "GET", body, token } = {}) {
+//
+// IMPORTANT:
+// Some build environments may treat modules as CJS and disallow named exports.
+// To avoid that, this file uses a DEFAULT EXPORT ONLY.
+
+async function api(path, { method = "GET", body, token } = {}) {
   const headers = { "Content-Type": "application/json" };
   if (token) headers["Authorization"] = `Bearer ${token}`;
   const res = await fetch(path, {
@@ -19,18 +24,16 @@ export async function api(path, { method = "GET", body, token } = {}) {
 
 // Local "auth": create or reuse a user id stored in localStorage.
 // Replace with real auth later.
-export function getLocalUser() {
+function getLocalUser() {
   const raw = localStorage.getItem("sp_user");
   if (!raw) return null;
   try { return JSON.parse(raw); } catch { return null; }
 }
-export function setLocalUser(u) {
+function setLocalUser(u) {
   localStorage.setItem("sp_user", JSON.stringify(u));
 }
-export function clearLocalUser() {
+function clearLocalUser() {
   localStorage.removeItem("sp_user");
 }
 
-
-// Default export for compatibility with environments that treat modules as CJS.
 export default { api, getLocalUser, setLocalUser, clearLocalUser };
