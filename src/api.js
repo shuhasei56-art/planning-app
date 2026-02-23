@@ -1,47 +1,31 @@
-const API_BASE = 'http://localhost:8787';
+// Workerのエンドポイント（ローカル開発時はWranglerのURL）
+const API_URL = '/api/chat'; 
 
-export async function searchStocks(query) {
-  try {
-    const res = await fetch(`${API_BASE}/api/search?q=${query}`);
-    return await res.json();
-  } catch (err) {
-    console.error(err);
-    return [];
-  }
-}
+export async function sendMessageStream(message, onChunk) {
+    try {
+        const response = await fetch(API_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message })
+        });
 
-export async function getChartData(symbol, interval = '15m', range = '5d') {
-  try {
-    const res = await fetch(`${API_BASE}/api/chart?symbol=${symbol}&interval=${interval}&range=${range}`);
-    const data = await res.json();
-    
-    if (!data || !data.timestamp) return { chartData: [], meta: null };
+        if (!response.ok) throw new Error('Network response was not ok');
 
-    const timestamps = data.timestamp;
-    const quotes = data.indicators.quote[0];
+        // ストリーミングデータを読み込む
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder('utf-8');
+        let done = false;
 
-    // lightweight-chartsのフォーマットに整形し、不正なデータを除去してソート
-    const formattedData = timestamps.map((time, index) => ({
-      time: time,
-      open: quotes.open[index],
-      high: quotes.high[index],
-      low: quotes.low[index],
-      close: quotes.close[index],
-    }))
-    .filter(item => item.open !== null && item.high !== null && item.low !== null && item.close !== null)
-    .sort((a, b) => a.time - b.time);
-
-    // 時間の重複を排除
-    const uniqueData = [];
-    for (let i = 0; i < formattedData.length; i++) {
-      if (i === 0 || formattedData[i].time !== formattedData[i - 1].time) {
-        uniqueData.push(formattedData[i]);
-      }
+        while (!done) {
+            const { value, done: readerDone } = await reader.read();
+            done = readerDone;
+            if (value) {
+                const chunk = decoder.decode(value, { stream: true });
+                onChunk(chunk); // 文字列の断片をUIに渡す
+            }
+        }
+    } catch (error) {
+        console.error('API Error:', error);
+        onChunk('\n[エラーが発生しました]');
     }
-
-    return { chartData: uniqueData, meta: data.meta };
-  } catch (error) {
-    console.error("Failed to fetch chart data", error);
-    return { chartData: [], meta: null };
-  }
 }
