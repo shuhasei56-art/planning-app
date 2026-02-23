@@ -30,3 +30,7 @@ export function setLocalUser(u) {
 export function clearLocalUser() {
   localStorage.removeItem("sp_user");
 }
+
+
+// Default export for compatibility with environments that treat modules as CJS.
+export default { api, getLocalUser, setLocalUser, clearLocalUser };
