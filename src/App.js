@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { api, clearLocalUser, getLocalUser, setLocalUser } from "./api";
+import apiMod from "./api";
+const { api, clearLocalUser, getLocalUser, setLocalUser } = apiMod;
 import { excerpt, renderMarkdown } from "./markdown";
 
 function useHashRoute() {
