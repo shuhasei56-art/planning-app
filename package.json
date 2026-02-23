@@ -1,23 +1,12 @@
 {
-  "name": "portfolio-manager",
+  "name": "chat-app",
   "version": "1.0.0",
-  "private": true,
-  "dependencies": {
-    "lightweight-charts": "^4.1.3",
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0",
-    "react-scripts": "5.0.1"
+  "description": "Fast streaming AI chat application",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
   },
   "devDependencies": {
     "wrangler": "^3.0.0"
-  },
-  "scripts": {
-    "start": "react-scripts start",
-    "build": "react-scripts build",
-    "worker": "wrangler dev worker.js"
-  },
-  "browserslist": {
-    "production": [">0.2%", "not dead", "not op_mini all"],
-    "development": ["last 1 chrome version", "last 1 firefox version", "last 1 safari version"]
   }
 }
