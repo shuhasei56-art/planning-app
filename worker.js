@@ -1,6 +1,5 @@
 // Cloudflare Worker for Super Planner Books
-// Bindings: env.DB (D1)
-// R2は不使用。画像はD1にbase64で保存して /api/img/:id で配信。
+// Bindings: env.DB (D1), env.AI (AI)
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -52,7 +51,6 @@ async function ensureUser(env, display_name) {
   return { user_id, display_name, token: user_id, balance: 1000 };
 }
 
-// ArrayBuffer -> base64
 function abToBase64(ab) {
   let binary = "";
   const bytes = new Uint8Array(ab);
@@ -63,7 +61,6 @@ function abToBase64(ab) {
   return btoa(binary);
 }
 
-// base64 -> Uint8Array
 function base64ToBytes(b64) {
   const bin = atob(b64);
   const out = new Uint8Array(bin.length);
@@ -71,7 +68,6 @@ function base64ToBytes(b64) {
   return out;
 }
 
-// ★R2なし画像アップロード：D1へ保存
 async function handleUpload(req, env) {
   const auth = await requireUser(req, env);
   if (!auth.ok) return auth.res;
@@ -86,8 +82,6 @@ async function handleUpload(req, env) {
   const mime = file.type || "";
   if (!mime.startsWith("image/")) return err("画像ファイルのみ対応です", 400);
 
-  // ★確実性優先：サイズ制限（D1に保存するため）
-  // 目安：1MB以下推奨。必要なら増やせるがDB肥大化に注意。
   const MAX_BYTES = 1 * 1024 * 1024;
   if (file.size > MAX_BYTES) return err("画像が大きすぎます（最大1MB）。小さくして再アップロードしてください。", 400);
 
@@ -105,7 +99,6 @@ async function handleUpload(req, env) {
   return json({ url: `${url.origin}/api/img/${encodeURIComponent(id)}` });
 }
 
-// ★D1から画像配信
 async function handleImage(req, env, id) {
   const row = await env.DB.prepare("SELECT mime, data_base64 FROM images WHERE id=?").bind(id).first();
   if (!row) return new Response("Not found", { status: 404 });
@@ -125,17 +118,35 @@ export default {
     if (req.method === "OPTIONS") return new Response("", { status: 204, headers: CORS_HEADERS });
 
     if (!url.pathname.startsWith("/api/")) {
-      // assetsはwranglerのassetsで配信される想定
       return new Response("OK", { status: 200 });
     }
 
-    // 画像配信
+    // === AIアシスト機能 ===
+    if (url.pathname === "/api/ai" && req.method === "POST") {
+      const auth = await requireUser(req, env);
+      if (!auth.ok) return auth.res;
+
+      const body = await req.json().catch(() => null);
+      if (!body || !body.prompt) return err("プロンプトが必要です", 400);
+
+      try {
+        const response = await env.AI.run('@cf/meta/llama-3-8b-instruct', {
+          messages: [
+            { role: "system", content: "あなたは優秀な執筆アシスタントです。ユーザーが書いた文章の続きを、自然な日本語で1〜2段落ほど作成してください。マークダウンは使わず、プレーンテキストで出力してください。" },
+            { role: "user", content: body.prompt }
+          ]
+        });
+        return json({ result: response.response });
+      } catch (e) {
+        return err("AIの呼び出しに失敗しました。", 500);
+      }
+    }
+
     if (url.pathname.startsWith("/api/img/") && req.method === "GET") {
       const id = decodeURIComponent(url.pathname.replace("/api/img/", ""));
       return handleImage(req, env, id);
     }
 
-    // ユーザー作成（初期1000コイン）
     if (url.pathname === "/api/users" && req.method === "POST") {
       const body = await req.json().catch(() => null);
       const name = (body?.display_name || "ユーザー").toString().slice(0, 40);
@@ -143,19 +154,16 @@ export default {
       return json({ user_id: u.user_id, display_name: u.display_name, token: u.token, balance: u.balance });
     }
 
-    // 自分情報
     if (url.pathname === "/api/me" && req.method === "GET") {
       const auth = await requireUser(req, env);
       if (!auth.ok) return auth.res;
       return json({ me: auth.user });
     }
 
-    // 画像アップロード（D1）
     if (url.pathname === "/api/upload" && req.method === "POST") {
       return handleUpload(req, env);
     }
 
-    // ページ作成
     if (url.pathname === "/api/pages" && req.method === "POST") {
       const auth = await requireUser(req, env);
       if (!auth.ok) return auth.res;
@@ -186,7 +194,6 @@ export default {
       return json({ page });
     }
 
-    // 自分のページ一覧
     if (url.pathname === "/api/pages/mine" && req.method === "GET") {
       const auth = await requireUser(req, env);
       if (!auth.ok) return auth.res;
@@ -194,7 +201,6 @@ export default {
       return json({ pages: rows.results || [] });
     }
 
-    // 公開一覧
     if (url.pathname === "/api/pages/public" && req.method === "GET") {
       const rows = await env.DB.prepare(
         "SELECT p.*, u.display_name AS author_name FROM pages p JOIN users u ON u.id=p.author_id WHERE p.status='published' ORDER BY p.published_at DESC, p.updated_at DESC LIMIT 50"
@@ -202,7 +208,6 @@ export default {
       return json({ pages: rows.results || [] });
     }
 
-    // /api/pages/:id GET/PUT
     const mPage = url.pathname.match(/^\/api\/pages\/([^/]+)$/);
     if (mPage && req.method === "GET") {
       const auth = await requireUser(req, env);
@@ -245,7 +250,6 @@ export default {
       return json({ page: updated });
     }
 
-    // 公開
     const mPub = url.pathname.match(/^\/api\/pages\/([^/]+)\/publish$/);
     if (mPub && req.method === "POST") {
       const auth = await requireUser(req, env);
@@ -261,7 +265,6 @@ export default {
       return json({ page: updated });
     }
 
-    // 公開ページ取得（slug）
     const mPublic = url.pathname.match(/^\/api\/p\/([^/]+)$/);
     if (mPublic && req.method === "GET") {
       const slug = decodeURIComponent(mPublic[1]);
@@ -283,7 +286,6 @@ export default {
       return json({ page, viewer });
     }
 
-    // 購入（コイン移動）
     if (url.pathname === "/api/purchase" && req.method === "POST") {
       const auth = await requireUser(req, env);
       if (!auth.ok) return auth.res;
