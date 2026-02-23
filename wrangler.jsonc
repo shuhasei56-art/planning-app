@@ -1,7 +1,21 @@
 {
   "name": "super-planner",
+  "main": "./worker.js",
   "compatibility_date": "2026-02-21",
   "assets": {
     "directory": "./build"
-  }
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "super_planner_db",
+      "database_id": "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "BUCKET",
+      "bucket_name": "super-planner-images"
+    }
+  ]
 }
