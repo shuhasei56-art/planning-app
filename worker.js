@@ -1,51 +1,58 @@
 export default {
-  async fetch(request, env, ctx) {
-    const url = new URL(request.url);
-    const path = url.pathname;
+    async fetch(request, env, ctx) {
+        const url = new URL(request.url);
 
-    const corsHeaders = {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type',
-    };
-
-    // プリフライトリクエスト対応
-    if (request.method === 'OPTIONS') {
-      return new Response(null, { headers: corsHeaders });
-    }
-
-    try {
-      // 1. 銘柄検索API
-      if (path === '/api/search') {
-        const q = url.searchParams.get('q');
-        const res = await fetch(`https://query2.finance.yahoo.com/v1/finance/search?q=${q}`);
-        const data = await res.json();
-        return new Response(JSON.stringify(data.quotes), { 
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
-        });
-      }
-
-      // 2. チャートデータ取得API
-      if (path === '/api/chart') {
-        const symbol = url.searchParams.get('symbol');
-        const interval = url.searchParams.get('interval') || '15m'; // 15分足
-        const range = url.searchParams.get('range') || '5d';        // 過去5日分
-        
-        const res = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=${interval}&range=${range}`);
-        const data = await res.json();
-        
-        if (data.chart.error) {
-           return new Response(JSON.stringify({ error: data.chart.error }), { status: 400, headers: corsHeaders });
+        // CORS対応
+        if (request.method === 'OPTIONS') {
+            return new Response(null, {
+                headers: {
+                    'Access-Control-Allow-Origin': '*',
+                    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+                    'Access-Control-Allow-Headers': 'Content-Type',
+                }
+            });
         }
-        
-        return new Response(JSON.stringify(data.chart.result[0]), { 
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
-        });
-      }
 
-      return new Response("Not Found", { status: 404, headers: corsHeaders });
-    } catch (error) {
-      return new Response(JSON.stringify({ error: error.message }), { status: 500, headers: corsHeaders });
+        // APIエンドポイントの処理
+        if (request.method === 'POST' && url.pathname === '/api/chat') {
+            try {
+                const { message } = await request.json();
+
+                // ------------------------------------------------------------------
+                // 【重要】ここで外部のLLM API（Gemini等）にリクエストを送ります。
+                // 返答を高速化するためには、外部APIのオプションで `stream: true` を設定し、
+                // そのストリームをそのままフロントエンドに流す（pipeTo）のがベストプラクティスです。
+                // 
+                // 以下は、ストリーミングの挙動をテストするためのモック（ダミー）実装です。
+                // ------------------------------------------------------------------
+                
+                const { readable, writable } = new TransformStream();
+                const writer = writable.getWriter();
+                const encoder = new TextEncoder();
+
+                // 非同期でダミーのテキストを少しずつ送信する処理
+                ctx.waitUntil((async () => {
+                    const replyText = `あなたが言ったのは「${message}」ですね。\n標準的なアシスタントとしてお答えします。`;
+                    for (let i = 0; i < replyText.length; i++) {
+                        await writer.write(encoder.encode(replyText[i]));
+                        await new Promise(resolve => setTimeout(resolve, 50)); // 擬似的な遅延
+                    }
+                    await writer.close();
+                })());
+
+                return new Response(readable, {
+                    headers: {
+                        'Content-Type': 'text/event-stream',
+                        'Access-Control-Allow-Origin': '*'
+                    }
+                });
+
+            } catch (error) {
+                return new Response('Error', { status: 500 });
+            }
+        }
+
+        // 静的ファイルの配信（Cloudflare Pagesを使用する場合は不要）
+        return new Response("Not Found", { status: 404 });
     }
-  }
 };
