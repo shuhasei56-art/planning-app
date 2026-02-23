@@ -1,5 +1,5 @@
 {
-  "name": "chat-app-worker",
+  "name": "planning-app",
   "main": "worker.js",
   "compatibility_date": "2024-02-23",
   "observability": {
