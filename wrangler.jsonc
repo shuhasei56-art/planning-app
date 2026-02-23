@@ -1,16 +1,5 @@
 {
-  "name": "super-planner",
-  "main": "./worker.js",
-  "compatibility_date": "2026-02-21",
-  "assets": { "directory": "./build" },
-  "d1_databases": [
-    {
-      "binding": "DB",
-      "database_name": "super_planner_db",
-      "database_id": "86fdb9b5-8454-4e57-9527-f21ca1ed1b22"
-    }
-  ],
-  "ai": {
-    "binding": "AI"
-  }
+  "name": "portfolio-api",
+  "main": "worker.js",
+  "compatibility_date": "2024-02-23"
 }
