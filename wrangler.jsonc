@@ -9,5 +9,8 @@
       "database_name": "super_planner_db",
       "database_id": "86fdb9b5-8454-4e57-9527-f21ca1ed1b22"
     }
-  ]
+  ],
+  "ai": {
+    "binding": "AI"
+  }
 }
