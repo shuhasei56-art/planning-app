@@ -4,9 +4,9 @@
   "compatibility_date": "2024-02-23",
   "observability": {
     "enabled": true
+  },
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS"
   }
-  // 環境変数（APIキーなど）を設定する場合は以下を追加
-  // "vars": {
-  //   "API_KEY": "your-api-key-here"
-  // }
 }
