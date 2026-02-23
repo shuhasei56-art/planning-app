@@ -1,12 +1,24 @@
 <!DOCTYPE html>
 <html lang="ja">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>資産・ポートフォリオ管理アプリ</title>
-  </head>
-  <body>
-    <noscript>JavaScriptを有効にしてください。</noscript>
-    <div id="root"></div>
-  </body>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fast AI Chatbot</title>
+    <link rel="stylesheet" href="../src/styles.css">
+</head>
+<body>
+    <div id="app">
+        <header>
+            <h1>AI Chat</h1>
+        </header>
+        <main id="chat-container">
+            <div id="messages"></div>
+        </main>
+        <div id="input-area">
+            <input type="text" id="user-input" placeholder="メッセージを入力..." autocomplete="off">
+            <button id="send-button">送信</button>
+        </div>
+    </div>
+    <script type="module" src="../src/index.js"></script>
+</body>
 </html>
