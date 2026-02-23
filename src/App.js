@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import apiMod from "./api";
-const { api, clearLocalUser, getLocalUser, setLocalUser } = apiMod;
 import mdMod from "./markdown";
+const { api, clearLocalUser, getLocalUser, setLocalUser } = apiMod;
 const { excerpt, renderMarkdown } = mdMod;
 
 function useHashRoute() {
