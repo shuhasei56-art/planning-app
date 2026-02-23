@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useState } from "react";
 import apiMod from "./api";
 const { api, clearLocalUser, getLocalUser, setLocalUser } = apiMod;
-import { excerpt, renderMarkdown } from "./markdown";
+import mdMod from "./markdown";
+const { excerpt, renderMarkdown } = mdMod;
 
 function useHashRoute() {
   const [hash, setHash] = useState(window.location.hash || "#/");
